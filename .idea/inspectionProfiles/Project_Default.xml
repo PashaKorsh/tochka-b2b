@@ -1,0 +1,85 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="false" level="WARNING" enabled_by_default="false">
+      <option name="ignoredPackages">
+        <list>
+          <option value="absl-py" />
+          <option value="albucore" />
+          <option value="albumentations" />
+          <option value="annotated-doc" />
+          <option value="annotated-types" />
+          <option value="anyio" />
+          <option value="black" />
+          <option value="click" />
+          <option value="colorama" />
+          <option value="contourpy" />
+          <option value="cycler" />
+          <option value="fastapi" />
+          <option value="filelock" />
+          <option value="fonttools" />
+          <option value="fsspec" />
+          <option value="grpcio" />
+          <option value="idna" />
+          <option value="ImageIO" />
+          <option value="Jinja2" />
+          <option value="joblib" />
+          <option value="kiwisolver" />
+          <option value="lazy-loader" />
+          <option value="Markdown" />
+          <option value="MarkupSafe" />
+          <option value="matplotlib" />
+          <option value="monai" />
+          <option value="mpmath" />
+          <option value="mypy_extensions" />
+          <option value="networkx" />
+          <option value="nibabel" />
+          <option value="numpy" />
+          <option value="opencv-python-headless" />
+          <option value="packaging" />
+          <option value="pandas" />
+          <option value="pathspec" />
+          <option value="Pillow" />
+          <option value="platformdirs" />
+          <option value="protobuf" />
+          <option value="pydantic" />
+          <option value="pydantic_core" />
+          <option value="pydicom" />
+          <option value="pyparsing" />
+          <option value="python-dateutil" />
+          <option value="pytokens" />
+          <option value="PyYAML" />
+          <option value="scikit-image" />
+          <option value="scikit-learn" />
+          <option value="scipy" />
+          <option value="seaborn" />
+          <option value="setuptools" />
+          <option value="simsimd" />
+          <option value="six" />
+          <option value="starlette" />
+          <option value="stringzilla" />
+          <option value="sympy" />
+          <option value="tensorboard" />
+          <option value="tensorboard-data-server" />
+          <option value="threadpoolctl" />
+          <option value="tifffile" />
+          <option value="torch" />
+          <option value="torchvision" />
+          <option value="tqdm" />
+          <option value="typing-inspection" />
+          <option value="typing_extensions" />
+          <option value="tzdata" />
+          <option value="Werkzeug" />
+          <option value="rsa" />
+          <option value="certifi" />
+          <option value="httpcore" />
+          <option value="httpx" />
+          <option value="iniconfig" />
+          <option value="pluggy" />
+          <option value="Pygments" />
+          <option value="pytest" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
