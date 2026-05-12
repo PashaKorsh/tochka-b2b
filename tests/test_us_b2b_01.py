@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
@@ -15,8 +17,11 @@ from backend.modules.products.models import Product, ProductStatus
 from backend.core.auth import SECRET_KEY, ALGORITHM
 
 
-# Test database URL
-TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@postgres:5432/tochkab2b_test"
+# Test database URL (CI: localhost; docker-compose: override TEST_DATABASE_URL if needed)
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/tochkab2b",
+)
 
 # Create test engine
 test_engine = create_async_engine(

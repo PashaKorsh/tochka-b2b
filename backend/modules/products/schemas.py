@@ -128,3 +128,37 @@ class ErrorResponse(BaseModel):
     code: str = Field(..., description="Machine-readable error code")
     message: str = Field(..., description="Human-readable error message")
     details: Optional[dict] = Field(None, description="Optional structured error context")
+
+
+class SKUImageCreate(BaseModel):
+    url: str = Field(..., min_length=1, max_length=2000)
+    ordering: int = Field(default=0, ge=0)
+
+
+class SKUCharacteristicCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    value: str = Field(..., min_length=1, max_length=2000)
+
+
+class SKUCreate(BaseModel):
+    """
+    Request schema for POST /api/v1/skus (US-B2B-02).
+    Matches neomarket-protocols `components.schemas.SKUCreate` (required: product_id, name, price;
+    optional: stock_quantity default 0, article nullable, images/characteristics default []).
+
+    Business validation beyond OpenAPI (canon b2b-flows.md#add-sku):
+    - At least one image is required after parse (empty images → 400).
+    - If `cost_price` is sent, it must be > 0 (canon line 231).
+    """
+    product_id: UUID = Field(..., description="ID товара")
+    name: str = Field(..., min_length=1, max_length=255, description="Название варианта")
+    price: int = Field(..., gt=0, description="Цена продажи в копейках")
+    stock_quantity: int = Field(default=0, ge=0, description="Остаток (OpenAPI default 0)")
+    article: Optional[str] = Field(None, description="Артикул (OpenAPI optional/nullable)")
+    cost_price: Optional[int] = Field(
+        default=None,
+        description="Себестоимость в копейках; отсутствует в OpenAPI SKUCreate, задаётся опционально",
+    )
+    discount: int = Field(default=0, ge=0, description="Абсолютная скидка в копейках")
+    images: List[SKUImageCreate] = Field(default_factory=list, description="Изображения SKU")
+    characteristics: List[SKUCharacteristicCreate] = Field(default_factory=list, description="Характеристики SKU")
