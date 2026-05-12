@@ -70,8 +70,9 @@ async def create_product(
         return ProductResponse.model_validate(product)
     except ValueError as e:
         if "Category not found" in str(e):
-            raise HTTPException(
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "INVALID_REQUEST", "message": "Category not found"}
+                content={"code": "INVALID_REQUEST", "message": "Category not found"}
             )
         raise
