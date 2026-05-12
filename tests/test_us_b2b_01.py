@@ -16,7 +16,7 @@ from backend.core.auth import SECRET_KEY, ALGORITHM
 
 
 # Test database URL
-TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/tochkab2b_test"
+TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@postgres:5432/tochkab2b_test"
 
 # Create test engine
 test_engine = create_async_engine(
