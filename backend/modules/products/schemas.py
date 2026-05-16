@@ -128,3 +128,39 @@ class ErrorResponse(BaseModel):
     code: str = Field(..., description="Machine-readable error code")
     message: str = Field(..., description="Human-readable error message")
     details: Optional[dict] = Field(None, description="Optional structured error context")
+
+
+class SKUImageCreate(BaseModel):
+    url: str = Field(..., min_length=1, max_length=2000)
+    ordering: int = Field(default=0, ge=0)
+
+
+class SKUCharacteristicCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    value: str = Field(..., min_length=1, max_length=2000)
+
+
+class SKUCreate(BaseModel):
+    """
+    Request schema for POST /api/v1/skus (US-B2B-02).
+    Matches spec b2b/neomarket-b2b.yaml#SKUCreate (required: product_id, name, price;
+    optional: stock_quantity default 0, article nullable, cost_price nullable,
+    discount default 0, images/characteristics default []).
+
+    Канон b2b-flows.md#add-sku требует для name/price/cost_price/image ошибку 400
+    с конкретным сообщением (не 422). Поэтому `name`/`price` не валидируются здесь
+    жёстко (min_length / gt), а проверяются в ProductService.create_sku, которая
+    бросает ValueError → router отдаёт 400 INVALID_REQUEST.
+    """
+    product_id: UUID = Field(..., description="ID товара")
+    name: str = Field(..., max_length=255, description="Название варианта (1-255, проверка 400 в сервисе)")
+    price: int = Field(..., description="Цена продажи в копейках (>0, проверка 400 в сервисе)")
+    stock_quantity: int = Field(default=0, ge=0, description="Остаток (spec default 0)")
+    article: Optional[str] = Field(None, description="Артикул (spec nullable)")
+    cost_price: Optional[int] = Field(
+        default=None,
+        description="Себестоимость в копейках (spec nullable); если задана — >0 (канон)",
+    )
+    discount: int = Field(default=0, ge=0, description="Абсолютная скидка в копейках")
+    images: List[SKUImageCreate] = Field(default_factory=list, description="Изображения SKU")
+    characteristics: List[SKUCharacteristicCreate] = Field(default_factory=list, description="Характеристики SKU")
