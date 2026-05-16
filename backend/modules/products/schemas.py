@@ -164,3 +164,35 @@ class SKUCreate(BaseModel):
     discount: int = Field(default=0, ge=0, description="Абсолютная скидка в копейках")
     images: List[SKUImageCreate] = Field(default_factory=list, description="Изображения SKU")
     characteristics: List[SKUCharacteristicCreate] = Field(default_factory=list, description="Характеристики SKU")
+
+
+class ProductUpdate(BaseModel):
+    """
+    Request schema for PATCH /api/v1/products/{product_id} (US-B2B-03).
+
+    Spec b2b/neomarket-b2b.yaml#ProductUpdate — partial update, все поля опциональны:
+    передаются только изменяемые. `images` редактируются отдельными эндпоинтами
+    (POST/PATCH/DELETE /products/{id}/images), поэтому в ProductUpdate их нет.
+    `slug` неизменяем (стабильный идентификатор карточки).
+    """
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = Field(None, min_length=1, max_length=5000)
+    category_id: Optional[UUID] = None
+    characteristics: Optional[List[ProductCharacteristicCreate]] = None
+
+
+class SKUUpdate(BaseModel):
+    """
+    Request schema for PATCH /api/v1/skus/{sku_id} (US-B2B-03).
+
+    Spec b2b/neomarket-b2b.yaml#SKUUpdate — partial update, все поля опциональны.
+    `product_id` неизменяем (canon b2b-flows.md#edit-product). `reserved_quantity`
+    не редактируется — активные резервы сохраняются. name/price/cost_price
+    проверяются в сервисе → 400 INVALID_REQUEST (как в US-B2B-02).
+    """
+    name: Optional[str] = Field(None, max_length=255)
+    price: Optional[int] = None
+    discount: Optional[int] = Field(None, ge=0)
+    cost_price: Optional[int] = None
+    article: Optional[str] = None
+    characteristics: Optional[List[SKUCharacteristicCreate]] = None
