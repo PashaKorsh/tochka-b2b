@@ -12,6 +12,8 @@ from sqlalchemy.orm import selectinload
 
 from backend.modules.categories.models import Category
 from backend.modules.products.models import (
+    BlockingReason,
+    FieldReport,
     Product,
     ProductCharacteristic,
     ProductImage,
@@ -163,6 +165,68 @@ class ProductService:
 
         result = await db.execute(query)
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_product_for_view(
+        db: AsyncSession,
+        product_id: UUID,
+        *,
+        seller_id: Optional[UUID] = None,
+    ) -> Optional[Product]:
+        """
+        Load a product for GET /api/v1/products/{id} (US-B2B-05) with every
+        relationship the response needs.
+
+        If `seller_id` is given (seller-cabinet view) ownership is enforced:
+        a product owned by another seller is treated as not found (returns None
+        → 404, not 403) so the existence of competitors' products is not leaked.
+        `seller_id=None` is the cross-service view (X-Service-Key) — no check.
+        """
+        result = await db.execute(
+            select(Product)
+            .options(
+                selectinload(Product.images),
+                selectinload(Product.characteristics),
+                selectinload(Product.skus).selectinload(SKU.images),
+                selectinload(Product.skus).selectinload(SKU.characteristics),
+                selectinload(Product.category),
+            )
+            .where(Product.id == product_id)
+        )
+        product = result.scalar_one_or_none()
+        if product is None:
+            return None
+        if seller_id is not None and product.seller_id != seller_id:
+            return None  # IDOR: hide existence — 404, not 403
+        return product
+
+    @staticmethod
+    async def get_blocking_feedback(
+        db: AsyncSession,
+        product: Product,
+    ) -> tuple[Optional[dict], list]:
+        """
+        Load moderation feedback for a product (US-B2B-05).
+
+        Returns (blocking_reason, field_reports):
+        - blocking_reason — dict {id, title, comment} or None if the product has
+          no blocking_reason_id;
+        - field_reports — list of FieldReport rows (empty if none).
+        """
+        blocking_reason = None
+        if product.blocking_reason_id is not None:
+            reason = await db.get(BlockingReason, product.blocking_reason_id)
+            if reason is not None:
+                blocking_reason = {
+                    "id": reason.id,
+                    "title": reason.title,
+                    "comment": product.moderator_comment,
+                }
+        fr_result = await db.execute(
+            select(FieldReport).where(FieldReport.product_id == product.id)
+        )
+        field_reports = list(fr_result.scalars().all())
+        return blocking_reason, field_reports
 
     @staticmethod
     async def create_sku(
