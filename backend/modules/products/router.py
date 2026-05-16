@@ -1,5 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+import os
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 from typing import Optional
@@ -9,9 +13,11 @@ from backend.modules.products.models import ProductStatus
 from backend.modules.products.schemas import (
     ProductCreate, ProductResponse, ErrorResponse, SKUCreate, SKUResponse,
     ProductUpdate, SKUUpdate, ProductShortResponse, ProductPaginatedResponse,
+    ProductDetailResponse, ProductPublicResponse, BlockingReasonResponse,
+    FieldReportResponse,
 )
 from backend.modules.products.service import ProductService
-from backend.core.auth import get_current_seller
+from backend.core.auth import get_current_seller, SECRET_KEY, ALGORITHM
 from backend.modules.auth.models import Seller
 
 
@@ -489,3 +495,132 @@ async def delete_product(
         if response is not None:
             return response
         raise
+
+
+# ───────────────────── US-B2B-05: view product card ─────────────────────
+
+class _ProductViewer:
+    """Resolved caller of GET /products/{id}: seller-cabinet or cross-service."""
+
+    def __init__(self, mode: str, seller_id: Optional[UUID] = None):
+        self.mode = mode  # "seller" | "service"
+        self.seller_id = seller_id
+
+
+_optional_bearer = HTTPBearer(auto_error=False)
+
+
+def _unauthorized() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"code": "UNAUTHORIZED", "message": "Could not validate credentials"},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def get_product_viewer(
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_optional_bearer),
+    db: AsyncSession = Depends(get_db),
+) -> _ProductViewer:
+    """
+    Resolve the caller of GET /products/{id} (US-B2B-05):
+    - X-Service-Key header → cross-service view (B2C catalog / Moderation);
+    - Bearer JWT → seller-cabinet view (seller_id из JWT claims);
+    - neither → 401.
+
+    Single dependency → the endpoint picks the response schema by `mode`,
+    so sensitive fields are dropped by the schema itself, not by ad-hoc logic.
+    """
+    if x_service_key:
+        expected = os.getenv("SERVICE_API_KEY", "dev-service-key")
+        if x_service_key != expected:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "UNAUTHORIZED", "message": "Invalid service key"},
+            )
+        return _ProductViewer(mode="service")
+
+    if credentials is None:
+        raise _unauthorized()
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if sub is None:
+            raise ValueError("missing sub")
+        seller_id = UUID(sub)
+    except (JWTError, ValueError):
+        raise _unauthorized()
+
+    seller = await db.get(Seller, seller_id)
+    if seller is None:
+        raise _unauthorized()
+    return _ProductViewer(mode="seller", seller_id=seller.id)
+
+
+@router.get(
+    "/products/{product_id}",
+    response_model=None,
+    responses={
+        200: {"description": "Product card (seller-view or public B2C-view)"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        404: {"model": ErrorResponse, "description": "Product not found"},
+    },
+    summary="Карточка товара (US-B2B-05)",
+    description="""
+    Получение карточки товара.
+
+    Бизнес-логика (canon b2b-flows.md#view-product):
+    - Bearer JWT → seller-режим: полный payload (cost_price, reserved_quantity),
+      а при статусе BLOCKED — blocking_reason и field_reports с замечаниями.
+    - X-Service-Key → межсервисный режим: ProductPublicResponse без cost_price /
+      reserved_quantity и без модерационной обратной связи.
+    - Чужой товар → 404 (не 403): не раскрываем факт существования.
+    - Несуществующий товар → 404.
+
+    Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):
+    - Path:     GET /api/v1/products/{product_id}
+    - Response: ProductResponse (seller) | ProductPublicResponse (X-Service-Key)
+    """,
+)
+async def get_product(
+    product_id: UUID,
+    viewer: _ProductViewer = Depends(get_product_viewer),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    GET /api/v1/products/{product_id} - View product card (US-B2B-05).
+
+    Canon test scenarios:
+    - get_moderated_product_returns_full_payload
+    - get_blocked_product_returns_blocking_reason_and_field_reports
+    - get_others_product_returns_404
+    - get_nonexistent_returns_404
+    """
+    not_found = JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={"code": "NOT_FOUND", "message": "Product not found"},
+    )
+
+    if viewer.mode == "service":
+        product = await ProductService.get_product_for_view(db, product_id, seller_id=None)
+        if product is None:
+            return not_found
+        return ProductPublicResponse.model_validate(product)
+
+    # Seller-cabinet view — ownership enforced inside the service (404, not 403).
+    product = await ProductService.get_product_for_view(
+        db, product_id, seller_id=viewer.seller_id
+    )
+    if product is None:
+        return not_found
+
+    blocking_reason, field_reports = await ProductService.get_blocking_feedback(db, product)
+    base = ProductResponse.model_validate(product)
+    return ProductDetailResponse(
+        **base.model_dump(),
+        blocking_reason=(
+            BlockingReasonResponse(**blocking_reason) if blocking_reason is not None else None
+        ),
+        field_reports=[FieldReportResponse.model_validate(report) for report in field_reports],
+    )

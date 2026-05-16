@@ -110,3 +110,29 @@ class SKUCharacteristic(Base):
     value = Column(String(2000), nullable=False)
 
     sku = relationship("SKU", back_populates="characteristics")
+
+
+class BlockingReason(Base):
+    """
+    Reference catalogue of moderation blocking reasons (US-B2B-05).
+    `Product.blocking_reason_id` points here; populated from Moderation events.
+    """
+    __tablename__ = "blocking_reasons"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title = Column(String(255), nullable=False)
+
+
+class FieldReport(Base):
+    """
+    Per-field moderation remark for a blocked product (US-B2B-05).
+    Created from Moderation BLOCKED events; shown to the seller so they know
+    exactly what to fix. `sku_id` is null for product-level issues.
+    """
+    __tablename__ = "field_reports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    product_id = Column(UUID(as_uuid=True), ForeignKey("products.id"), nullable=False)
+    field_name = Column(String(50), nullable=False)
+    sku_id = Column(UUID(as_uuid=True), nullable=True)
+    comment = Column(Text, nullable=False)

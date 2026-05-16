@@ -227,3 +227,82 @@ class ProductPaginatedResponse(BaseModel):
     total_count: int
     limit: int
     offset: int
+
+
+# ───────────────────── US-B2B-05: view product card ─────────────────────
+
+class BlockingReasonResponse(BaseModel):
+    """
+    Moderation blocking reason shown to the seller (canon b2b-flows.md#view-product).
+    `id`/`title` — из справочника BlockingReason; `comment` — moderator_comment товара.
+    """
+    id: UUID
+    title: str
+    comment: Optional[str] = None
+
+
+class FieldReportResponse(BaseModel):
+    """
+    Per-field moderation remark (canon b2b-flows.md#view-product).
+    `sku_id` is None for product-level issues.
+    """
+    field_name: str
+    sku_id: Optional[UUID] = None
+    comment: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProductDetailResponse(ProductResponse):
+    """
+    Seller-view response for GET /api/v1/products/{id} (US-B2B-05).
+
+    Расширяет ProductResponse модерационной обратной связью: при статусе BLOCKED
+    продавец видит `blocking_reason` (причина) и `field_reports` (точечные
+    замечания по полям). Для остальных статусов — blocking_reason=null,
+    field_reports=[]. Канон требует этих полей; в spec ProductResponse их пока
+    нет — кандидат на PR в neomarket-protocols.
+    """
+    blocking_reason: Optional[BlockingReasonResponse] = None
+    field_reports: List[FieldReportResponse] = Field(default_factory=list)
+
+
+class SKUPublicResponse(BaseModel):
+    """
+    Public B2C-view SKU, spec b2b/neomarket-b2b.yaml#SKUPublicResponse.
+    БЕЗ cost_price и reserved_quantity — чувствительные поля только для продавца.
+    """
+    id: UUID
+    product_id: UUID
+    name: str
+    price: int
+    discount: int
+    stock_quantity: int
+    active_quantity: int
+    article: Optional[str]
+    images: List[SKUImageResponse]
+    characteristics: List[CharacteristicResponse]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProductPublicResponse(BaseModel):
+    """
+    Public B2C-view product card, spec b2b/neomarket-b2b.yaml#ProductPublicResponse.
+    Возвращается при межсервисном вызове (X-Service-Key): без cost_price /
+    reserved_quantity и без модерационной обратной связи.
+    """
+    id: UUID
+    seller_id: UUID
+    category_id: UUID
+    title: str
+    slug: str
+    description: str
+    status: ProductStatus
+    images: List[ProductImageResponse]
+    characteristics: List[CharacteristicResponse]
+    skus: List[SKUPublicResponse]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
