@@ -22,24 +22,31 @@
    - Для модерации нужен хотя бы один SKU (US-B2B-02)
    - Нет побочных эффектов при создании
 
-### ✅ Соответствие OpenAPI (b2b/openapi.yaml)
+### ✅ Соответствие merged spec (b2b/neomarket-b2b.yaml)
 
-**Request: ProductCreate (lines 1598-1628)**
+Реализация приведена к объединённой спецификации `b2b/neomarket-b2b.yaml`
+(репозиторий `neomarket-protocols`) — путь (а) арбитража.
+
+**Request: ProductCreate**
 - `category_id`: UUID, required
 - `title`: string, required (1-255 символов)
-- `description`: string | null, optional
-- `images`: array, optional, default=[]
+- `description`: string, **required** (1-5000 символов) — канон и spec требуют обязательное описание
+- `images`: array, **required, минимум 1 элемент** — бизнес-инвариант канона: без фото карточка не попадает в каталог B2C
 - `characteristics`: array, optional, default=[]
 
-**Response: ProductResponse (lines 1740-1800)**
-- Все обязательные поля из openapi
-- Дополнительно `deleted` и `blocked` (требуются каноном)
-- `category_id` возвращается плоским UUID (не nested object)
+**Response: ProductResponse**
+- Все обязательные поля spec, включая `slug`, `blocking_reason_id` (nullable), `moderator_comment` (nullable)
+- `skus` — полный `SKUResponse` (seller-view с `cost_price`, `reserved_quantity`, `active_quantity`)
+- Дополнительно `blocked` (требуется каноном; spec-клиенты игнорируют лишние поля)
+- `category_id` возвращается плоским UUID
 
-**Error: ErrorResponse**
-- 400: `{"code": "INVALID_REQUEST", "message": "..."}`
-- 401: `{"code": "UNAUTHORIZED", "message": "..."}`
-- 422: Pydantic validation error
+**Error: единый формат `{"code": ..., "message": ..., "details"?: ...}`**
+- 400 `INVALID_REQUEST` — несуществующая категория
+- 401 `UNAUTHORIZED` — нет/невалидный токен
+- 403 `FORBIDDEN`, 404 `NOT_FOUND` — через глобальный handler
+- 422 `VALIDATION_ERROR` — ошибка валидации тела запроса
+- Глобальные exception-handler'ы в `backend/main.py` переопределяют дефолтный
+  FastAPI-формат `{"detail": ...}` для всех 4xx
 
 ### ✅ Тесты (DoD)
 
@@ -60,28 +67,46 @@
    - Несуществующий category_id → 400 INVALID_REQUEST
 
 **Дополнительные тесты:**
-- `test_product_without_images_is_allowed` - images опциональны
-- `test_product_with_optional_description` - description опциональное
-- `test_unauthorized_request_returns_401` - проверка авторизации
-- `test_response_contains_all_required_fields` - полнота response
+- `test_product_without_images_is_rejected` — без images → 422 (минимум 1 обязателен)
+- `test_product_without_description_is_rejected` — без description → 422 (обязательное)
+- `test_unauthorized_request_returns_401` — 401 с телом `{"code": "UNAUTHORIZED", ...}`
+- `test_response_contains_all_required_fields` — полнота response, включая `slug`,
+  `blocking_reason_id`, `moderator_comment`
 
-## Ключевые исправления ошибок других команд
+## Приведение к merged spec (арбитраж, путь «а»)
 
-### 1. description - опциональное поле
-**Проблема других команд:** `min_length=1` (strengthen request)
-**Наше решение:** `Optional[str]` согласно openapi.yaml:1608-1611 (anyOf [string, null])
+### 1. ProductResponse: добавлены поля spec
+- `slug` (string, required) — генерируется из `title` при создании
+  (`ProductService._generate_slug`), всегда непустой
+- `blocking_reason_id` (uuid, nullable) — `None` до блокировки модерацией
+- `moderator_comment` (string, nullable) — `None` до ревью модератором
 
-### 2. images - опциональное поле с default=[]
-**Проблема других команд:** `min_length=1` (strengthen request)
-**Наше решение:** `default_factory=list` согласно openapi.yaml:1612-1617
+### 2. skus: полный SKUResponse вместо урезанного
+`skus` отдаёт seller-view `SKUResponse` с `cost_price`, `reserved_quantity`,
+`active_quantity` (= stock − reserved, computed-property на модели `SKU`).
 
-### 3. category_id в response - плоский UUID
-**Проблема других команд:** nested object `{id, name, level, path}` (breaking change)
-**Наше решение:** плоский `category_id: UUID` согласно openapi.yaml:1750-1752
+### 3. Единый формат ошибок
+Глобальные exception-handler'ы в `backend/main.py`:
+- `RequestValidationError` → 422 `{"code": "VALIDATION_ERROR", "message", "details"}`
+- `HTTPException` → `{"code", "message"}` с маппингом статуса в код (401/403/404/409/…)
 
-### 4. deleted и blocked в response
-**Проблема других команд:** отсутствуют
-**Наше решение:** добавлены согласно канону b2b-flows.md:89-91
+### 4. description — обязательное поле
+`description` обязательное, 1-5000 символов — согласно канону (b2b-flows.md)
+и `b2b/neomarket-b2b.yaml#ProductCreate` (`required: [title, description, category_id]`).
+В `ProductResponse` `description` — non-nullable string, поэтому request-поле
+не может быть опциональным.
+
+### 5. images — обязательное, минимум 1
+`images` обязателен минимум с 1 элементом. Это сознательное ужесточение
+относительно spec (`default: []`) в пользу бизнес-инварианта канона
+(«Minimum 1 image required»): без фото товар не появляется в каталоге B2C.
+
+### 6. category_id в response — плоский UUID
+Плоский `category_id: UUID` согласно spec ProductResponse.
+
+### 7. deleted и blocked в response
+`deleted` — обязательное поле spec. `blocked` — дополнительно из канона
+(b2b-flows.md); spec-совместимые клиенты игнорируют лишние поля.
 
 ## ADR: Хранение характеристик товара
 

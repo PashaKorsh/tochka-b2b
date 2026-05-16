@@ -1,11 +1,12 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from uuid import UUID
+from uuid import UUID, uuid4
 from typing import Optional
+import re
 
 from backend.modules.products.models import (
-    Product, ProductImage, ProductCharacteristic, ProductStatus
+    Product, ProductImage, ProductCharacteristic, ProductStatus, SKU
 )
 from backend.modules.products.schemas import ProductCreate
 from backend.modules.categories.models import Category
@@ -16,6 +17,19 @@ class ProductService:
     Service layer for Product operations.
     Implements business logic for US-B2B-01: Create Product.
     """
+
+    @staticmethod
+    def _generate_slug(title: str, product_id: UUID) -> str:
+        """
+        Build a URL slug for a product.
+
+        spec b2b/neomarket-b2b.yaml#ProductResponse requires `slug` as a
+        non-nullable string, so it is derived from the title at creation time.
+        A short product-id suffix keeps it unique even for identical titles.
+        """
+        base = re.sub(r"[^\w]+", "-", title.strip().lower(), flags=re.UNICODE).strip("-")
+        suffix = str(product_id).split("-")[0]
+        return f"{base}-{suffix}" if base else suffix
 
     @staticmethod
     async def create_product(
@@ -49,15 +63,21 @@ class ProductService:
         if not category:
             raise ValueError("Category not found")
 
-        # Create product with CREATED status (canon: товар создается со статусом CREATED)
+        # Create product with CREATED status (canon: товар создается со статусом CREATED).
+        # The id is generated up-front so the non-nullable slug can be built before INSERT.
+        product_id = uuid4()
         product = Product(
+            id=product_id,
             seller_id=seller_id,
             category_id=product_data.category_id,
             title=product_data.title,
+            slug=ProductService._generate_slug(product_data.title, product_id),
             description=product_data.description,
             status=ProductStatus.CREATED,
             deleted=False,
-            blocked=False
+            blocked=False,
+            blocking_reason_id=None,
+            moderator_comment=None
         )
         db.add(product)
         await db.flush()
@@ -88,7 +108,8 @@ class ProductService:
             .options(
                 selectinload(Product.images),
                 selectinload(Product.characteristics),
-                selectinload(Product.skus),
+                selectinload(Product.skus).selectinload(SKU.images),
+                selectinload(Product.skus).selectinload(SKU.characteristics),
                 selectinload(Product.category)
             )
             .where(Product.id == product.id)

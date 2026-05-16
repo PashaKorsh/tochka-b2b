@@ -170,6 +170,8 @@ async def test_seller_id_taken_from_jwt(
         json={
             "category_id": str(test_category.id),
             "title": "Test Product",
+            "description": "Test description",
+            "images": [{"url": "/s3/test.jpg", "ordering": 0}],
             "seller_id": fake_seller_id  # Попытка подменить seller_id
         },
         headers={"Authorization": f"Bearer {auth_token}"}
@@ -226,7 +228,9 @@ async def test_invalid_category_id_returns_400(
         "/api/v1/products",
         json={
             "category_id": non_existent_category_id,
-            "title": "Test Product"
+            "title": "Test Product",
+            "description": "Test description",
+            "images": [{"url": "/s3/test.jpg", "ordering": 0}]
         },
         headers={"Authorization": f"Bearer {auth_token}"}
     )
@@ -238,7 +242,7 @@ async def test_invalid_category_id_returns_400(
 
 
 @pytest.mark.asyncio
-async def test_product_without_images_is_allowed(
+async def test_product_without_images_is_rejected(
     client: AsyncClient,
     db_session: AsyncSession,
     test_seller: Seller,
@@ -246,27 +250,29 @@ async def test_product_without_images_is_allowed(
     auth_token: str
 ):
     """
-    Проверяет, что товар можно создать без изображений.
+    Проверяет, что товар БЕЗ изображений отклоняется с 422.
 
-    Важно: В openapi.yaml images имеет default=[] (не required).
-    Другие команды ошибочно делали min_length=1.
+    Бизнес-инвариант канона (b2b-flows.md, "Minimum 1 image required"):
+    без фото карточка не попадает в каталог B2C, поэтому images обязателен
+    минимум с 1 элементом.
     """
     response = await client.post(
         "/api/v1/products",
         json={
             "category_id": str(test_category.id),
-            "title": "Product Without Images"
+            "title": "Product Without Images",
+            "description": "Some description"
         },
         headers={"Authorization": f"Bearer {auth_token}"}
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 422
     data = response.json()
-    assert data["images"] == []
+    assert data["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
-async def test_product_with_optional_description(
+async def test_product_without_description_is_rejected(
     client: AsyncClient,
     db_session: AsyncSession,
     test_seller: Seller,
@@ -274,22 +280,24 @@ async def test_product_with_optional_description(
     auth_token: str
 ):
     """
-    Проверяет, что description опциональное.
+    Проверяет, что товар БЕЗ описания отклоняется с 422.
 
-    В openapi.yaml description: anyOf [string, null] (не required).
+    Канон (b2b-flows.md) и spec b2b/neomarket-b2b.yaml#ProductCreate:
+    description обязательное, 1-5000 символов.
     """
     response = await client.post(
         "/api/v1/products",
         json={
             "category_id": str(test_category.id),
-            "title": "Product Without Description"
+            "title": "Product Without Description",
+            "images": [{"url": "/s3/test.jpg", "ordering": 0}]
         },
         headers={"Authorization": f"Bearer {auth_token}"}
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 422
     data = response.json()
-    assert data["description"] is None
+    assert data["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -298,17 +306,23 @@ async def test_unauthorized_request_returns_401(
     test_category: Category
 ):
     """
-    Проверяет, что запрос без токена возвращает 401.
+    Проверяет, что запрос без токена возвращает 401
+    с унифицированным телом ошибки {"code": ..., "message": ...}.
     """
     response = await client.post(
         "/api/v1/products",
         json={
             "category_id": str(test_category.id),
-            "title": "Test Product"
+            "title": "Test Product",
+            "description": "Test description",
+            "images": [{"url": "/s3/test.jpg", "ordering": 0}]
         }
     )
 
     assert response.status_code == 401
+    data = response.json()
+    assert data["code"] == "UNAUTHORIZED"
+    assert "message" in data
 
 
 @pytest.mark.asyncio
@@ -320,15 +334,16 @@ async def test_response_contains_all_required_fields(
     auth_token: str
 ):
     """
-    Проверяет, что response содержит все обязательные поля из openapi.yaml ProductResponse.
+    Проверяет, что response содержит все обязательные поля
+    spec b2b/neomarket-b2b.yaml#ProductResponse.
 
-    Обязательные поля (openapi.yaml:1788-1800):
-    - id, seller_id, category_id, title, description, status
+    Обязательные поля spec:
+    - id, seller_id, category_id, title, slug, description, status
+    - deleted, blocking_reason_id, moderator_comment
     - images, characteristics, skus
     - created_at, updated_at
 
-    Дополнительно из канона (b2b-flows.md:89-91):
-    - deleted, blocked
+    Дополнительно из канона (b2b-flows.md): deleted, blocked.
     """
     response = await client.post(
         "/api/v1/products",
@@ -345,19 +360,19 @@ async def test_response_contains_all_required_fields(
     assert response.status_code == 201
     data = response.json()
 
-    # OpenAPI required fields
-    assert "id" in data
-    assert "seller_id" in data
-    assert "category_id" in data
-    assert "title" in data
-    assert "description" in data
-    assert "status" in data
-    assert "images" in data
-    assert "characteristics" in data
-    assert "skus" in data
-    assert "created_at" in data
-    assert "updated_at" in data
+    # spec ProductResponse required fields
+    for field in (
+        "id", "seller_id", "category_id", "title", "slug", "description",
+        "status", "deleted", "blocking_reason_id", "moderator_comment",
+        "images", "characteristics", "skus", "created_at", "updated_at",
+    ):
+        assert field in data, f"missing required field: {field}"
 
-    # Canon required fields (missing in openapi but required by business logic)
-    assert "deleted" in data
+    # slug — required non-nullable string, derived from title
+    assert isinstance(data["slug"], str) and data["slug"]
+    # not yet moderated → nullable fields are None
+    assert data["blocking_reason_id"] is None
+    assert data["moderator_comment"] is None
+
+    # Canon extra field (b2b-flows.md)
     assert "blocked" in data
