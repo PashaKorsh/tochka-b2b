@@ -20,7 +20,12 @@ from backend.modules.products.models import (
     SKUCharacteristic,
     SKUImage,
 )
-from backend.modules.products.schemas import ProductCreate, SKUCreate
+from backend.modules.products.schemas import (
+    ProductCreate,
+    ProductUpdate,
+    SKUCreate,
+    SKUUpdate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +290,199 @@ class ProductService:
             .options(
                 selectinload(SKU.images),
                 selectinload(SKU.characteristics)
+            )
+            .where(SKU.id == sku.id)
+        )
+        return result.scalar_one()
+
+    @staticmethod
+    async def update_product(
+        db: AsyncSession,
+        product_id: UUID,
+        update_data: ProductUpdate,
+        seller_id: UUID,
+    ) -> Product:
+        """
+        Edit a product (US-B2B-03, PATCH /api/v1/products/{product_id}).
+
+        Business rules from canon b2b-flows.md#edit-product:
+        1. Ownership check — product must belong to seller_id from JWT (else 403).
+        2. HARD_BLOCKED products cannot be edited (403).
+        3. Partial update — only provided fields are changed; `slug` stays stable.
+        4. Status transition: MODERATED / BLOCKED → ON_MODERATION + событие EDITED.
+           CREATED / ON_MODERATION — статус не меняется, событие не отправляется.
+
+        Raises:
+            ValueError: not found / NOT_OWNER / HARD_BLOCKED / Category not found.
+        """
+        # Lock the product row — serialises concurrent edits and status transitions.
+        result = await db.execute(
+            select(Product).where(Product.id == product_id).with_for_update()
+        )
+        product = result.scalar_one_or_none()
+
+        if not product:
+            raise ValueError("Product not found")
+        if product.seller_id != seller_id:
+            raise ValueError("NOT_OWNER: Product does not belong to the authenticated seller")
+        if product.status == ProductStatus.HARD_BLOCKED:
+            raise ValueError("HARD_BLOCKED: Cannot edit a hard-blocked product")
+
+        fields_set = update_data.model_fields_set
+
+        if "category_id" in fields_set and update_data.category_id is not None:
+            category = await db.get(Category, update_data.category_id)
+            if not category:
+                raise ValueError("Category not found")
+            product.category_id = update_data.category_id
+        if "title" in fields_set and update_data.title is not None:
+            product.title = update_data.title
+        if "description" in fields_set and update_data.description is not None:
+            product.description = update_data.description
+        if "characteristics" in fields_set and update_data.characteristics is not None:
+            # Replace the whole characteristics set (canon: name/value pairs).
+            existing = await db.execute(
+                select(ProductCharacteristic).where(
+                    ProductCharacteristic.product_id == product.id
+                )
+            )
+            for char in existing.scalars().all():
+                await db.delete(char)
+            await db.flush()
+            for char_data in update_data.characteristics:
+                db.add(ProductCharacteristic(
+                    product_id=product.id,
+                    name=char_data.name,
+                    value=char_data.value,
+                ))
+
+        # Status transition (canon b2b-flows.md#edit-product).
+        should_emit = product.status in (ProductStatus.MODERATED, ProductStatus.BLOCKED)
+        if should_emit:
+            product.status = ProductStatus.ON_MODERATION
+
+        await db.commit()
+
+        # After commit — notify Moderation. EDITED uses a fresh per-edit idempotency_key
+        # (unlike the stable CREATED key): every edit is a distinct re-moderation event.
+        if should_emit:
+            await ProductService._send_moderation_event(
+                product_id=product.id,
+                seller_id=seller_id,
+                event_type="EDITED",
+                idempotency_key=str(uuid4()),
+            )
+
+        result = await db.execute(
+            select(Product)
+            .options(
+                selectinload(Product.images),
+                selectinload(Product.characteristics),
+                selectinload(Product.skus).selectinload(SKU.images),
+                selectinload(Product.skus).selectinload(SKU.characteristics),
+                selectinload(Product.category),
+            )
+            .where(Product.id == product.id)
+        )
+        return result.scalar_one()
+
+    @staticmethod
+    async def update_sku(
+        db: AsyncSession,
+        sku_id: UUID,
+        update_data: SKUUpdate,
+        seller_id: UUID,
+    ) -> SKU:
+        """
+        Edit a SKU (US-B2B-03, PATCH /api/v1/skus/{sku_id}).
+
+        Business rules from canon b2b-flows.md#edit-product:
+        1. Ownership check via the parent product (seller_id from JWT, else 403).
+        2. HARD_BLOCKED parent product → editing forbidden (403).
+        3. Partial update; `product_id` is immutable; `reserved_quantity` is NOT
+           touched — active reserves are preserved (B2B does not cancel reserves).
+        4. Editing a SKU also returns the parent product to moderation:
+           MODERATED / BLOCKED → ON_MODERATION + событие EDITED.
+
+        Raises:
+            ValueError: SKU not found / NOT_OWNER / HARD_BLOCKED / invalid field.
+        """
+        fields_set = update_data.model_fields_set
+
+        # Field validation — canon: invalid data → 400 (mirrors B2B-2 rules).
+        if "name" in fields_set and update_data.name is not None:
+            if not update_data.name.strip():
+                raise ValueError("name is required")
+        if "price" in fields_set and update_data.price is not None:
+            if update_data.price <= 0:
+                raise ValueError("price must be a positive integer (kopecks)")
+        if "cost_price" in fields_set and update_data.cost_price is not None:
+            if update_data.cost_price <= 0:
+                raise ValueError("cost_price must be a positive integer (kopecks)")
+
+        result = await db.execute(select(SKU).where(SKU.id == sku_id))
+        sku = result.scalar_one_or_none()
+        if not sku:
+            raise ValueError("SKU not found")
+
+        # Lock the parent product — ownership, status check and transition.
+        result = await db.execute(
+            select(Product).where(Product.id == sku.product_id).with_for_update()
+        )
+        product = result.scalar_one_or_none()
+        if not product:
+            raise ValueError("Product not found")
+        if product.seller_id != seller_id:
+            raise ValueError("NOT_OWNER: Product does not belong to the authenticated seller")
+        if product.status == ProductStatus.HARD_BLOCKED:
+            raise ValueError("HARD_BLOCKED: Cannot edit a hard-blocked product")
+
+        if "name" in fields_set and update_data.name is not None:
+            sku.name = update_data.name
+        if "price" in fields_set and update_data.price is not None:
+            sku.price = update_data.price
+        if "discount" in fields_set and update_data.discount is not None:
+            sku.discount = update_data.discount
+        if "cost_price" in fields_set and update_data.cost_price is not None:
+            sku.cost_price = update_data.cost_price
+        if "article" in fields_set:
+            # article is nullable — allow both setting and clearing.
+            sku.article = update_data.article
+        if "characteristics" in fields_set and update_data.characteristics is not None:
+            existing = await db.execute(
+                select(SKUCharacteristic).where(SKUCharacteristic.sku_id == sku.id)
+            )
+            for char in existing.scalars().all():
+                await db.delete(char)
+            await db.flush()
+            for char_data in update_data.characteristics:
+                db.add(SKUCharacteristic(
+                    sku_id=sku.id,
+                    name=char_data.name,
+                    value=char_data.value,
+                ))
+
+        # reserved_quantity intentionally untouched — active reserves are preserved.
+
+        should_emit = product.status in (ProductStatus.MODERATED, ProductStatus.BLOCKED)
+        if should_emit:
+            product.status = ProductStatus.ON_MODERATION
+
+        await db.commit()
+
+        if should_emit:
+            await ProductService._send_moderation_event(
+                product_id=product.id,
+                seller_id=seller_id,
+                event_type="EDITED",
+                idempotency_key=str(uuid4()),
+            )
+
+        result = await db.execute(
+            select(SKU)
+            .options(
+                selectinload(SKU.images),
+                selectinload(SKU.characteristics),
             )
             .where(SKU.id == sku.id)
         )

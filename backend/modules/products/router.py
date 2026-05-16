@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
+from typing import Optional
 
 from backend.database import get_db
 from backend.modules.products.schemas import (
-    ProductCreate, ProductResponse, ErrorResponse, SKUCreate, SKUResponse
+    ProductCreate, ProductResponse, ErrorResponse, SKUCreate, SKUResponse,
+    ProductUpdate, SKUUpdate,
 )
 from backend.modules.products.service import ProductService
 from backend.core.auth import get_current_seller
@@ -188,4 +191,173 @@ async def create_sku(
                     "message": "price must be a positive integer (kopecks)",
                 },
             )
+        raise
+
+
+def _edit_error_response(error_msg: str) -> Optional[JSONResponse]:
+    """
+    Map a ProductService edit ValueError to a unified {code, message} response
+    (US-B2B-03). Returns None if the error is not a known business error.
+
+    cost_price проверяется ДО price: "cost_price must be..." содержит подстроку
+    "price must be...".
+    """
+    if "Category not found" in error_msg:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"code": "INVALID_REQUEST", "message": "Category not found"},
+        )
+    if "Product not found" in error_msg or "SKU not found" in error_msg:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"code": "NOT_FOUND", "message": error_msg},
+        )
+    if "NOT_OWNER" in error_msg or "does not belong" in error_msg:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "code": "NOT_OWNER",
+                "message": "Product does not belong to the authenticated seller",
+            },
+        )
+    if "HARD_BLOCKED" in error_msg:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"code": "FORBIDDEN", "message": "Cannot edit a hard-blocked product"},
+        )
+    if "cost_price must be a positive integer" in error_msg:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "code": "INVALID_REQUEST",
+                "message": "cost_price must be a positive integer (kopecks)",
+            },
+        )
+    if "price must be a positive integer" in error_msg:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "code": "INVALID_REQUEST",
+                "message": "price must be a positive integer (kopecks)",
+            },
+        )
+    if "name is required" in error_msg:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"code": "INVALID_REQUEST", "message": "name is required"},
+        )
+    return None
+
+
+@router.patch(
+    "/products/{product_id}",
+    response_model=ProductResponse,
+    responses={
+        200: {"description": "Product updated"},
+        400: {"model": ErrorResponse, "description": "Invalid request (validation error, category not found)"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        403: {"model": ErrorResponse, "description": "HARD_BLOCKED or not owned by seller"},
+        404: {"model": ErrorResponse, "description": "Product not found"},
+        422: {"description": "Validation Error"},
+    },
+    summary="Редактировать товар (US-B2B-03)",
+    description="""
+    Частичное редактирование карточки товара продавцом.
+
+    Бизнес-логика (canon b2b-flows.md#edit-product):
+    - seller_id берётся из JWT; чужой товар → 403 NOT_OWNER
+    - HARD_BLOCKED редактировать нельзя → 403 FORBIDDEN
+    - Передаются только изменяемые поля (PATCH-семантика); slug неизменяем
+    - Статус MODERATED/BLOCKED → ON_MODERATION + событие EDITED в Moderation
+    - Статус CREATED/ON_MODERATION — без смены статуса и без события
+
+    Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):
+    - Path:     PATCH /api/v1/products/{product_id}
+    - Request:  ProductUpdate
+    - Response: ProductResponse
+    """,
+)
+async def update_product(
+    product_id: UUID,
+    update_data: ProductUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_seller: Seller = Depends(get_current_seller),
+) -> ProductResponse:
+    """
+    PATCH /api/v1/products/{product_id} - Edit product (US-B2B-03).
+
+    Canon test scenarios:
+    - edit_moderated_product_returns_to_on_moderation
+    - edit_blocked_product_returns_to_on_moderation
+    - edit_hard_blocked_returns_403
+    - edit_others_product_returns_403
+    """
+    try:
+        product = await ProductService.update_product(
+            db=db,
+            product_id=product_id,
+            update_data=update_data,
+            seller_id=current_seller.id,
+        )
+        return ProductResponse.model_validate(product)
+    except ValueError as e:
+        response = _edit_error_response(str(e))
+        if response is not None:
+            return response
+        raise
+
+
+@router.patch(
+    "/skus/{sku_id}",
+    response_model=SKUResponse,
+    responses={
+        200: {"description": "SKU updated"},
+        400: {"model": ErrorResponse, "description": "Invalid request (validation error)"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        403: {"model": ErrorResponse, "description": "HARD_BLOCKED or not owned by seller"},
+        404: {"model": ErrorResponse, "description": "SKU not found"},
+        422: {"description": "Validation Error"},
+    },
+    summary="Редактировать SKU (US-B2B-03)",
+    description="""
+    Частичное редактирование варианта товара (SKU) продавцом.
+
+    Бизнес-логика (canon b2b-flows.md#edit-product):
+    - seller_id из JWT; чужой товар → 403 NOT_OWNER
+    - HARD_BLOCKED родительский товар → 403 FORBIDDEN
+    - product_id неизменяем; reserved_quantity не меняется — резервы сохраняются
+    - Редактирование SKU возвращает родительский товар в ON_MODERATION
+      (если он был MODERATED/BLOCKED) + событие EDITED
+
+    Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):
+    - Path:     PATCH /api/v1/skus/{sku_id}
+    - Request:  SKUUpdate
+    - Response: SKUResponse
+    """,
+)
+async def update_sku(
+    sku_id: UUID,
+    update_data: SKUUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_seller: Seller = Depends(get_current_seller),
+) -> SKUResponse:
+    """
+    PATCH /api/v1/skus/{sku_id} - Edit SKU (US-B2B-03).
+
+    Canon test scenarios:
+    - reserves_preserved_after_sku_edit
+    - edit_hard_blocked_returns_403
+    """
+    try:
+        sku = await ProductService.update_sku(
+            db=db,
+            sku_id=sku_id,
+            update_data=update_data,
+            seller_id=current_seller.id,
+        )
+        return SKUResponse.model_validate(sku)
+    except ValueError as e:
+        response = _edit_error_response(str(e))
+        if response is not None:
+            return response
         raise
