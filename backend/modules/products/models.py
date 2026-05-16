@@ -23,10 +23,16 @@ class Product(Base):
     seller_id = Column(UUID(as_uuid=True), ForeignKey("sellers.id"), nullable=False)
     category_id = Column(UUID(as_uuid=True), ForeignKey("categories.id"), nullable=False)
     title = Column(String(255), nullable=False)
-    description = Column(Text, nullable=True)
+    # slug — required non-nullable string in ProductResponse (spec b2b/neomarket-b2b.yaml).
+    # Generated from title at creation time, see ProductService._generate_slug.
+    slug = Column(String(300), nullable=False)
+    description = Column(Text, nullable=False)
     status = Column(SQLEnum(ProductStatus), default=ProductStatus.CREATED, nullable=False)
     deleted = Column(Boolean, default=False, nullable=False)
     blocked = Column(Boolean, default=False, nullable=False)
+    # Populated by Moderation events (US-B2B later); None until the product is blocked/reviewed.
+    blocking_reason_id = Column(UUID(as_uuid=True), nullable=True)
+    moderator_comment = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -70,13 +76,18 @@ class SKU(Base):
     reserved_quantity = Column(Integer, default=0, nullable=False)
     article = Column(String(255), nullable=True)
     cost_price = Column(Integer, nullable=True)
-    discount = Column(Integer, nullable=True)
+    discount = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     product = relationship("Product", back_populates="skus")
     images = relationship("SKUImage", back_populates="sku", cascade="all, delete-orphan")
     characteristics = relationship("SKUCharacteristic", back_populates="sku", cascade="all, delete-orphan")
+
+    @property
+    def active_quantity(self) -> int:
+        """Available to sell = stock minus reserved (required field in SKUResponse)."""
+        return self.stock_quantity - self.reserved_quantity
 
 
 class SKUImage(Base):
