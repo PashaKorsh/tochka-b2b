@@ -196,3 +196,34 @@ class SKUUpdate(BaseModel):
     cost_price: Optional[int] = None
     article: Optional[str] = None
     characteristics: Optional[List[SKUCharacteristicCreate]] = None
+
+
+class ProductShortResponse(BaseModel):
+    """
+    Compact product card for the seller's product list (US-B2B-04).
+    Matches spec b2b/neomarket-b2b.yaml#ProductShortResponse.
+
+    `min_price` — минимальная цена среди SKU (None, если SKU нет).
+    `cover_image` — URL первого изображения по `ordering` (None, если изображений нет).
+    """
+    id: UUID
+    title: str
+    slug: str
+    status: ProductStatus
+    category_id: UUID
+    deleted: bool
+    created_at: datetime
+    min_price: Optional[int] = None
+    cover_image: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProductPaginatedResponse(BaseModel):
+    """
+    Paginated seller product list, spec b2b/neomarket-b2b.yaml#ProductPaginatedResponse.
+    """
+    items: List[ProductShortResponse]
+    total_count: int
+    limit: int
+    offset: int
