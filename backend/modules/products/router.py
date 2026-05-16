@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 from typing import Optional
 
 from backend.database import get_db
+from backend.modules.products.models import ProductStatus
 from backend.modules.products.schemas import (
     ProductCreate, ProductResponse, ErrorResponse, SKUCreate, SKUResponse,
-    ProductUpdate, SKUUpdate,
+    ProductUpdate, SKUUpdate, ProductShortResponse, ProductPaginatedResponse,
 )
 from backend.modules.products.service import ProductService
 from backend.core.auth import get_current_seller
@@ -207,6 +208,11 @@ def _edit_error_response(error_msg: str) -> Optional[JSONResponse]:
             status_code=status.HTTP_400_BAD_REQUEST,
             content={"code": "INVALID_REQUEST", "message": "Category not found"},
         )
+    if "Product already deleted" in error_msg:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"code": "INVALID_REQUEST", "message": "Product already deleted"},
+        )
     if "Product not found" in error_msg or "SKU not found" in error_msg:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -356,6 +362,128 @@ async def update_sku(
             seller_id=current_seller.id,
         )
         return SKUResponse.model_validate(sku)
+    except ValueError as e:
+        response = _edit_error_response(str(e))
+        if response is not None:
+            return response
+        raise
+
+
+def _to_short_response(product) -> ProductShortResponse:
+    """
+    Build a ProductShortResponse from a Product (US-B2B-04 list view).
+    `min_price` — минимальная цена SKU; `cover_image` — первое изображение по ordering.
+    """
+    prices = [sku.price for sku in product.skus]
+    cover_image = None
+    if product.images:
+        cover_image = min(product.images, key=lambda img: img.ordering).url
+    return ProductShortResponse(
+        id=product.id,
+        title=product.title,
+        slug=product.slug,
+        status=product.status,
+        category_id=product.category_id,
+        deleted=product.deleted,
+        created_at=product.created_at,
+        min_price=min(prices) if prices else None,
+        cover_image=cover_image,
+    )
+
+
+@router.get(
+    "/products",
+    response_model=ProductPaginatedResponse,
+    responses={
+        200: {"description": "Seller product list"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+    },
+    summary="Список своих товаров (US-B2B-04)",
+    description="""
+    Список товаров текущего продавца (seller_id из JWT).
+
+    По умолчанию мягко удалённые товары (deleted=true) НЕ показываются —
+    `include_deleted=true` включает их в выдачу.
+
+    Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):
+    - Path:     GET /api/v1/products
+    - Response: ProductPaginatedResponse
+    """,
+)
+async def list_products(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    status_filter: Optional[ProductStatus] = Query(None, alias="status"),
+    include_deleted: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    current_seller: Seller = Depends(get_current_seller),
+) -> ProductPaginatedResponse:
+    """GET /api/v1/products - Seller product list (US-B2B-04)."""
+    products, total_count = await ProductService.list_seller_products(
+        db=db,
+        seller_id=current_seller.id,
+        limit=limit,
+        offset=offset,
+        status=status_filter,
+        include_deleted=include_deleted,
+    )
+    return ProductPaginatedResponse(
+        items=[_to_short_response(product) for product in products],
+        total_count=total_count,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.delete(
+    "/products/{product_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        204: {"description": "Product soft-deleted"},
+        400: {"model": ErrorResponse, "description": "Product already deleted"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        403: {"model": ErrorResponse, "description": "Not owned by seller"},
+        404: {"model": ErrorResponse, "description": "Product not found"},
+    },
+    summary="Удалить товар (US-B2B-04)",
+    description="""
+    Мягкое удаление карточки товара продавцом.
+
+    Бизнес-логика (canon b2b-flows.md#delete-product):
+    - seller_id из JWT; чужой товар → 403 NOT_OWNER
+    - Повторное удаление уже удалённого товара → 400
+    - Soft delete: deleted=true, данные физически не удаляются
+    - Два каскадных события (fire-and-forget после commit):
+      * DELETED → Moderation
+      * PRODUCT_DELETED → B2C (с sku_ids — B2C помечает корзины/избранное)
+
+    Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):
+    - Path:     DELETE /api/v1/products/{product_id}
+    - Success:  204 No Content
+    """,
+)
+async def delete_product(
+    product_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_seller: Seller = Depends(get_current_seller),
+):
+    """
+    DELETE /api/v1/products/{product_id} - Soft-delete product (US-B2B-04).
+
+    Canon test scenarios:
+    - delete_sets_deleted_true
+    - delete_emits_event_to_moderation
+    - delete_emits_product_deleted_to_b2c
+    - delete_already_deleted_returns_400
+    - delete_others_product_returns_403
+    """
+    try:
+        await ProductService.delete_product(
+            db=db,
+            product_id=product_id,
+            seller_id=current_seller.id,
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     except ValueError as e:
         response = _edit_error_response(str(e))
         if response is not None:

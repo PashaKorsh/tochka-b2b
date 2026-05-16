@@ -6,7 +6,7 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -487,6 +487,156 @@ class ProductService:
             .where(SKU.id == sku.id)
         )
         return result.scalar_one()
+
+    @staticmethod
+    async def delete_product(
+        db: AsyncSession,
+        product_id: UUID,
+        seller_id: UUID,
+    ) -> None:
+        """
+        Soft-delete a product (US-B2B-04, DELETE /api/v1/products/{product_id}).
+
+        Business rules from canon b2b-flows.md#delete-product:
+        1. Ownership check — product must belong to seller_id from JWT (else 403).
+        2. Repeated delete of an already-deleted product → 400.
+        3. Soft delete — set deleted = true; данные физически не удаляются
+           (история заказов, ссылки, аналитика сохраняются).
+        4. Two cascade events, fire-and-forget after commit:
+           - DELETED → Moderation
+           - PRODUCT_DELETED → B2C (с sku_ids для пометки корзин/избранного)
+
+        Raises:
+            ValueError: Product not found / NOT_OWNER / Product already deleted.
+        """
+        # Lock the product row to serialise concurrent delete attempts.
+        result = await db.execute(
+            select(Product)
+            .options(selectinload(Product.skus))
+            .where(Product.id == product_id)
+            .with_for_update()
+        )
+        product = result.scalar_one_or_none()
+
+        if not product:
+            raise ValueError("Product not found")
+        if product.seller_id != seller_id:
+            raise ValueError("NOT_OWNER: Product does not belong to the authenticated seller")
+        if product.deleted:
+            raise ValueError("Product already deleted")
+
+        sku_ids = [str(sku.id) for sku in product.skus]
+        product.deleted = True
+        await db.commit()
+
+        # Cascade events. Stable per-product idempotency keys → retry/duplicate-safe.
+        await ProductService._send_moderation_event(
+            product_id=product_id,
+            seller_id=seller_id,
+            event_type="DELETED",
+            idempotency_key=str(uuid.uuid5(
+                uuid.NAMESPACE_URL, f"neomarket:b2b:product_deleted:{product_id}"
+            )),
+        )
+        await ProductService._send_b2c_event(
+            product_id=product_id,
+            sku_ids=sku_ids,
+            event_type="PRODUCT_DELETED",
+            idempotency_key=str(uuid.uuid5(
+                uuid.NAMESPACE_URL, f"neomarket:b2b:product_deleted_b2c:{product_id}"
+            )),
+        )
+
+    @staticmethod
+    async def list_seller_products(
+        db: AsyncSession,
+        seller_id: UUID,
+        limit: int = 20,
+        offset: int = 0,
+        status: Optional[ProductStatus] = None,
+        include_deleted: bool = False,
+    ) -> tuple[list[Product], int]:
+        """
+        List the seller's own products (US-B2B-04, GET /api/v1/products).
+
+        Soft-deleted products are excluded by default (include_deleted=False) —
+        удалённый товар не виден в стандартном списке продавца. Returns the page
+        of products together with the total count for pagination metadata.
+        """
+        filters = [Product.seller_id == seller_id]
+        if not include_deleted:
+            filters.append(Product.deleted.is_(False))
+        if status is not None:
+            filters.append(Product.status == status)
+
+        total_result = await db.execute(
+            select(func.count()).select_from(Product).where(*filters)
+        )
+        total_count = total_result.scalar_one()
+
+        result = await db.execute(
+            select(Product)
+            .options(
+                selectinload(Product.skus),
+                selectinload(Product.images),
+            )
+            .where(*filters)
+            .order_by(Product.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all()), total_count
+
+    @staticmethod
+    async def _send_b2c_event(
+        product_id: UUID,
+        sku_ids: list,
+        event_type: str,
+        idempotency_key: str,
+    ) -> None:
+        """
+        Send a cascade event to the B2C service.
+
+        Event format from canon b2b-flows.md#delete-product:
+        POST {b2c_url}/api/v1/events/product
+        X-Service-Key: {b2b_to_b2c_key}
+        {
+          "idempotency_key": "uuid",
+          "event": "PRODUCT_DELETED",
+          "product_id": "uuid",
+          "sku_ids": ["uuid", ...],
+          "date": "2026-03-16T09:00:00.000Z"
+        }
+
+        B2C использует sku_ids, чтобы пометить cart_items / wishlist_items
+        недоступными. Доставка: синхронный POST после commit, fire-and-forget —
+        при недоступности B2C ошибка логируется, ответ продавцу не ломается.
+        """
+        import os
+
+        b2c_url = os.getenv("B2C_URL", "http://b2c:8000")
+        service_key = os.getenv("B2B_TO_B2C_KEY", "dev-b2b-to-b2c-key")
+
+        event_payload = {
+            "idempotency_key": idempotency_key,
+            "event": event_type,
+            "product_id": str(product_id),
+            "sku_ids": [str(sku_id) for sku_id in sku_ids],
+            "date": datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    f"{b2c_url}/api/v1/events/product",
+                    json=event_payload,
+                    headers={"X-Service-Key": service_key},
+                )
+                response.raise_for_status()
+        except Exception as e:
+            logger.warning("Failed to send B2C event: %s", e, exc_info=True)
 
     @staticmethod
     async def _send_moderation_event(
