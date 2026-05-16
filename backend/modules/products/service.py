@@ -188,12 +188,17 @@ class ProductService:
         Raises:
             ValueError: If product not found, not owned, HARD_BLOCKED, or missing image
         """
-        # Validate at least one image (canon line 191, 233)
-        if not sku_data.images or len(sku_data.images) == 0:
-            raise ValueError("At least one image is required")
-
+        # Field validation — canon b2b-flows.md#add-sku требует 400 INVALID_REQUEST
+        # с конкретным текстом (а не 422). Делаем на уровне сервиса.
+        if not sku_data.name or not sku_data.name.strip():
+            raise ValueError("name is required")
+        if sku_data.price <= 0:
+            raise ValueError("price must be a positive integer (kopecks)")
         if sku_data.cost_price is not None and sku_data.cost_price <= 0:
             raise ValueError("cost_price must be a positive integer (kopecks)")
+        # At least one image required (canon line 191, 233)
+        if not sku_data.images or len(sku_data.images) == 0:
+            raise ValueError("At least one image is required")
 
         # Get product with FOR UPDATE lock to prevent race conditions
         result = await db.execute(
@@ -326,7 +331,9 @@ class ProductService:
             "product_id": str(product_id),
             "seller_id": str(seller_id),
             "event": event_type,
-            "date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "date": datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
         }
 
         try:

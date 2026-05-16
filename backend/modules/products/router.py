@@ -102,21 +102,21 @@ async def create_product(
     - Если товар уже имеет SKU - SKU просто добавляется, статус не меняется, события не отправляются
     - Товар в статусе HARD_BLOCKED нельзя редактировать → 403
 
-    Валидация:
+    Валидация (canon b2b-flows.md#add-sku → 400 INVALID_REQUEST):
     - product_id: обязательное, должен существовать и принадлежать текущему seller
     - name: обязательное, 1-255 символов
     - price: обязательное, > 0 (копейки)
-    - cost_price: опционально (нет в OpenAPI SKUCreate); если передано — > 0 (копейки)
+    - cost_price: опциональное, nullable; если передано — > 0 (копейки)
     - discount: опциональное, >= 0 (копейки), default=0
-    - stock_quantity: опциональное, default=0 (OpenAPI)
-    - article: опциональное (OpenAPI anyOf string|null)
-    - images: минимум 1 изображение обязательно (canon line 191, 233)
+    - stock_quantity: опциональное, default=0
+    - article: опциональное, nullable
+    - images: минимум 1 изображение обязательно
     - characteristics: опциональное
 
-    Соответствие OpenAPI:
-    - Request: SKUCreate (openapi.yaml:1901-1939)
-    - Response: SKUResponse (openapi.yaml:2056-2126)
-    - Path: POST /api/skus/create (openapi.yaml:671)
+    Соответствие spec (b2b/neomarket-b2b.yaml, репозиторий neomarket-protocols):
+    - Path:     POST /api/v1/skus
+    - Request:  SKUCreate
+    - Response: SKUResponse (seller-view: cost_price, active_quantity, reserved_quantity)
     """
 )
 async def create_sku(
@@ -165,12 +165,27 @@ async def create_sku(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={"code": "INVALID_REQUEST", "message": "image is required"}
             )
+        elif "name is required" in error_msg:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"code": "INVALID_REQUEST", "message": "name is required"},
+            )
+        # cost_price проверяется ДО price: строка "cost_price must be..." содержит
+        # подстроку "price must be...", иначе сработает не та ветка.
         elif "cost_price must be a positive integer" in error_msg:
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={
                     "code": "INVALID_REQUEST",
                     "message": "cost_price must be a positive integer (kopecks)",
+                },
+            )
+        elif "price must be a positive integer" in error_msg:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "code": "INVALID_REQUEST",
+                    "message": "price must be a positive integer (kopecks)",
                 },
             )
         raise

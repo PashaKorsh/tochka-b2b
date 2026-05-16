@@ -16,6 +16,7 @@ from backend.database import Base, get_db
 from backend.modules.auth.models import Seller
 from backend.modules.categories.models import Category
 from backend.modules.products.models import Product, ProductStatus, SKU
+from backend.modules.products.service import ProductService
 from backend.core.auth import SECRET_KEY, ALGORITHM
 
 
@@ -106,6 +107,7 @@ async def product(db_session, seller, category):
         seller_id=seller.id,
         category_id=category.id,
         title="Test Product",
+        slug="test-product",
         description="Test Description",
         status=ProductStatus.CREATED,
         deleted=False,
@@ -125,6 +127,7 @@ async def product_with_sku(db_session, seller, category):
         seller_id=seller.id,
         category_id=category.id,
         title="Test Product with SKU",
+        slug="test-product-with-sku",
         description="Test Description",
         status=ProductStatus.ON_MODERATION,
         deleted=False,
@@ -157,6 +160,7 @@ async def hard_blocked_product(db_session, seller, category):
         seller_id=seller.id,
         category_id=category.id,
         title="Hard Blocked Product",
+        slug="hard-blocked-product",
         description="Test Description",
         status=ProductStatus.HARD_BLOCKED,
         deleted=False,
@@ -476,6 +480,7 @@ async def test_not_owner_returns_403(client, db_session, seller, category):
         seller_id=other_seller.id,
         category_id=category.id,
         title="Other Product",
+        slug="other-product",
         description="Test",
         status=ProductStatus.CREATED,
         deleted=False,
@@ -546,10 +551,123 @@ async def test_sku_response_contains_all_required_fields(client, seller, product
     assert data["cost_price"] == 9500000
     assert data["discount"] == 500000
     assert data["stock_quantity"] == 0
+    assert data["active_quantity"] == 0
     assert data["reserved_quantity"] == 0
+    # active_quantity = stock - reserved (spec b2b/neomarket-b2b.yaml#SKUResponse)
+    assert data["active_quantity"] == data["stock_quantity"] - data["reserved_quantity"]
     assert len(data["images"]) == 1
     assert data["images"][0]["url"] == "/s3/iphone15-black-256.jpg"
     assert len(data["characteristics"]) == 1
     assert data["characteristics"][0]["name"] == "Цвет"
     assert "created_at" in data
     assert "updated_at" in data
+
+
+@pytest.mark.asyncio
+async def test_price_zero_returns_400(client, seller, product):
+    """
+    US-B2B-02: price <= 0 → 400 INVALID_REQUEST.
+
+    Canon b2b-flows.md#add-sku: "price must be a positive integer (kopecks)".
+    Проверяется на уровне сервиса (единый 400, как и cost_price).
+    """
+    token = create_access_token(str(seller.id))
+
+    response = await client.post(
+        "/api/v1/skus",
+        json={
+            "product_id": str(product.id),
+            "name": "256GB Black",
+            "price": 0,
+            "images": [{"url": "/s3/x.jpg", "ordering": 0}],
+            "characteristics": [],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    data = response.json()
+    assert data["code"] == "INVALID_REQUEST"
+    assert "price" in data["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_name_empty_returns_400(client, seller, product):
+    """
+    US-B2B-02: пустой name → 400 INVALID_REQUEST.
+
+    Canon b2b-flows.md#add-sku: "name is required".
+    """
+    token = create_access_token(str(seller.id))
+
+    response = await client.post(
+        "/api/v1/skus",
+        json={
+            "product_id": str(product.id),
+            "name": "   ",
+            "price": 12999000,
+            "images": [{"url": "/s3/x.jpg", "ordering": 0}],
+            "characteristics": [],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    data = response.json()
+    assert data["code"] == "INVALID_REQUEST"
+    assert "name" in data["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_send_moderation_event_posts_correct_payload():
+    """
+    US-B2B-02: _send_moderation_event отправляет событие в формате канона.
+
+    Canon b2b-flows.md#add-sku:
+    - POST {moderation_url}/api/v1/events/product
+    - заголовок X-Service-Key
+    - тело {idempotency_key, product_id, seller_id, event, date}
+    """
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _FakeResponse()
+
+    product_id = uuid4()
+    seller_id = uuid4()
+
+    with patch("backend.modules.products.service.httpx.AsyncClient", _FakeClient):
+        await ProductService._send_moderation_event(
+            product_id=product_id,
+            seller_id=seller_id,
+            event_type="CREATED",
+            idempotency_key="idemp-key-123",
+        )
+
+    assert captured["url"].endswith("/api/v1/events/product")
+    assert captured["headers"]["X-Service-Key"]
+    body = captured["json"]
+    assert body["idempotency_key"] == "idemp-key-123"
+    assert body["product_id"] == str(product_id)
+    assert body["seller_id"] == str(seller_id)
+    assert body["event"] == "CREATED"
+    assert body["date"].endswith("Z")
+    # millisecond precision: ".SSSZ" (канон-пример "...000Z")
+    assert len(body["date"].split(".")[-1]) == 4
