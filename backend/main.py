@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.modules.products.router import router as products_router
+from backend.modules.invoices.router import router as invoices_router
 from backend.database import create_tables
 
 
@@ -78,6 +79,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 # Include routers
 app.include_router(products_router)
+app.include_router(invoices_router)
 
 
 @app.on_event("startup")
