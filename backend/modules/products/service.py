@@ -571,7 +571,8 @@ class ProductService:
            - PRODUCT_DELETED → B2C (с sku_ids для пометки корзин/избранного)
 
         Raises:
-            ValueError: Product not found / NOT_OWNER / Product already deleted.
+            ValueError: Product not found / NOT_OWNER / HARD_BLOCKED /
+                        Product already deleted.
         """
         # Lock the product row to serialise concurrent delete attempts.
         result = await db.execute(
@@ -586,6 +587,9 @@ class ProductService:
             raise ValueError("Product not found")
         if product.seller_id != seller_id:
             raise ValueError("NOT_OWNER: Product does not belong to the authenticated seller")
+        # HARD_BLOCKED is terminal — the seller cannot edit or delete (US-B2B-09).
+        if product.status == ProductStatus.HARD_BLOCKED:
+            raise ValueError("HARD_BLOCKED: Cannot edit a hard-blocked product")
         if product.deleted:
             raise ValueError("Product already deleted")
 
