@@ -6,7 +6,7 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -646,6 +646,84 @@ class ProductService:
             )
             .where(*filters)
             .order_by(Product.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all()), total_count
+
+    @staticmethod
+    async def list_catalog_products(
+        db: AsyncSession,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        category_id: Optional[UUID] = None,
+        search: Optional[str] = None,
+        sort: str = "date_desc",
+        ids: Optional[list] = None,
+    ) -> tuple[list[Product], int]:
+        """
+        List products for the B2C catalog (US-B2B-07, GET /api/v1/products with
+        X-Service-Key).
+
+        Visibility (canon b2b-flows.md#catalog-for-b2c) — товар виден, только если:
+        - status == MODERATED;
+        - deleted == false;
+        - есть хотя бы один SKU с active_quantity (stock - reserved) > 0.
+
+        Ownership не применяется — это публичный режим, товары всех продавцов.
+        `ids` — батч-запрос: те же правила видимости, скрытые товары просто
+        отсутствуют в ответе (без 404).
+        """
+        active_sku_exists = (
+            select(SKU.id)
+            .where(
+                SKU.product_id == Product.id,
+                (SKU.stock_quantity - SKU.reserved_quantity) > 0,
+            )
+            .exists()
+        )
+        filters = [
+            Product.status == ProductStatus.MODERATED,
+            Product.deleted.is_(False),
+            active_sku_exists,
+        ]
+        if category_id is not None:
+            filters.append(Product.category_id == category_id)
+        if search:
+            pattern = f"%{search}%"
+            filters.append(
+                or_(Product.title.ilike(pattern), Product.description.ilike(pattern))
+            )
+        if ids is not None:
+            filters.append(Product.id.in_(ids))
+
+        total_result = await db.execute(
+            select(func.count()).select_from(Product).where(*filters)
+        )
+        total_count = total_result.scalar_one()
+
+        if sort in ("price_asc", "price_desc"):
+            min_price = (
+                select(func.min(SKU.price))
+                .where(SKU.product_id == Product.id)
+                .correlate(Product)
+                .scalar_subquery()
+            )
+            order_by = min_price.asc() if sort == "price_asc" else min_price.desc()
+        else:  # date_desc — default
+            order_by = Product.created_at.desc()
+
+        result = await db.execute(
+            select(Product)
+            .options(
+                selectinload(Product.images),
+                selectinload(Product.characteristics),
+                selectinload(Product.skus).selectinload(SKU.images),
+                selectinload(Product.skus).selectinload(SKU.characteristics),
+            )
+            .where(*filters)
+            .order_by(order_by)
             .limit(limit)
             .offset(offset)
         )

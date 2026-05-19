@@ -14,7 +14,7 @@ from backend.modules.products.schemas import (
     ProductCreate, ProductResponse, ErrorResponse, SKUCreate, SKUResponse,
     ProductUpdate, SKUUpdate, ProductShortResponse, ProductPaginatedResponse,
     ProductDetailResponse, ProductPublicResponse, BlockingReasonResponse,
-    FieldReportResponse,
+    FieldReportResponse, ProductPublicPaginatedResponse,
 )
 from backend.modules.products.service import ProductService
 from backend.core.auth import get_current_seller, SECRET_KEY, ALGORITHM
@@ -22,6 +22,68 @@ from backend.modules.auth.models import Seller
 
 
 router = APIRouter(prefix="/api/v1", tags=["Products"])
+
+
+# ───────────────────── Caller resolution (US-B2B-05 / US-B2B-07) ─────────────────────
+
+class _ProductViewer:
+    """Resolved caller of a product endpoint: seller-cabinet or cross-service."""
+
+    def __init__(self, mode: str, seller_id: Optional[UUID] = None):
+        self.mode = mode  # "seller" | "service"
+        self.seller_id = seller_id
+
+
+_optional_bearer = HTTPBearer(auto_error=False)
+
+
+def _unauthorized() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"code": "UNAUTHORIZED", "message": "Could not validate credentials"},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def get_product_viewer(
+    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_optional_bearer),
+    db: AsyncSession = Depends(get_db),
+) -> _ProductViewer:
+    """
+    Resolve who is calling a product endpoint:
+    - X-Service-Key header → cross-service mode (B2C catalog / Moderation);
+    - Bearer JWT → seller-cabinet mode (seller_id из JWT claims);
+    - neither → 401.
+
+    One dependency → the endpoint picks the response schema by `mode`, so
+    sensitive fields (cost_price, reserved_quantity) are dropped by the schema
+    itself, not by ad-hoc logic that could be forgotten in a new mode.
+    """
+    if x_service_key:
+        expected = os.getenv("SERVICE_API_KEY", "dev-service-key")
+        if x_service_key != expected:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "UNAUTHORIZED", "message": "Invalid service key"},
+            )
+        return _ProductViewer(mode="service")
+
+    if credentials is None:
+        raise _unauthorized()
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if sub is None:
+            raise ValueError("missing sub")
+        seller_id = UUID(sub)
+    except (JWTError, ValueError):
+        raise _unauthorized()
+
+    seller = await db.get(Seller, seller_id)
+    if seller is None:
+        raise _unauthorized()
+    return _ProductViewer(mode="seller", seller_id=seller.id)
 
 
 @router.post(
@@ -399,21 +461,29 @@ def _to_short_response(product) -> ProductShortResponse:
 
 @router.get(
     "/products",
-    response_model=ProductPaginatedResponse,
+    response_model=None,
     responses={
-        200: {"description": "Seller product list"},
+        200: {"description": "Seller product list (JWT) or B2C catalog (X-Service-Key)"},
+        400: {"model": ErrorResponse, "description": "Invalid ids parameter"},
         401: {"model": ErrorResponse, "description": "Unauthorized"},
     },
-    summary="Список своих товаров (US-B2B-04)",
+    summary="Список товаров — кабинет продавца / каталог B2C (US-B2B-04 / US-B2B-07)",
     description="""
-    Список товаров текущего продавца (seller_id из JWT).
+    Два режима по способу авторизации (canon b2b-flows.md#catalog-for-b2c):
 
-    По умолчанию мягко удалённые товары (deleted=true) НЕ показываются —
-    `include_deleted=true` включает их в выдачу.
+    Seller-режим (Bearer JWT):
+    - товары текущего продавца (seller_id из JWT), все статусы;
+    - `include_deleted=true` — показать мягко удалённые;
+    - ответ ProductPaginatedResponse (короткие карточки).
 
-    Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):
-    - Path:     GET /api/v1/products
-    - Response: ProductPaginatedResponse
+    B2C-каталог (X-Service-Key):
+    - публичный режим, товары всех продавцов, ownership не применяется;
+    - видимость: status=MODERATED, deleted=false, есть SKU с active_quantity>0;
+    - фильтры: category, search, sort (price_asc|price_desc|date_desc);
+    - `ids=uuid1,uuid2,...` — батч; скрытые товары просто отсутствуют (без 404);
+    - ответ ProductPublicPaginatedResponse — БЕЗ cost_price / reserved_quantity.
+
+    Без JWT и без X-Service-Key → 401.
     """,
 )
 async def list_products(
@@ -421,13 +491,60 @@ async def list_products(
     offset: int = Query(0, ge=0),
     status_filter: Optional[ProductStatus] = Query(None, alias="status"),
     include_deleted: bool = Query(False),
+    category_id: Optional[UUID] = Query(None, alias="category"),
+    search: Optional[str] = Query(None),
+    sort: str = Query("date_desc"),
+    ids: Optional[str] = Query(None, description="Батч: UUID через запятую (только каталог)"),
+    viewer: _ProductViewer = Depends(get_product_viewer),
     db: AsyncSession = Depends(get_db),
-    current_seller: Seller = Depends(get_current_seller),
-) -> ProductPaginatedResponse:
-    """GET /api/v1/products - Seller product list (US-B2B-04)."""
+):
+    """
+    GET /api/v1/products - seller list (US-B2B-04) or B2C catalog (US-B2B-07).
+
+    Canon test scenarios (catalog):
+    - catalog_returns_moderated_in_stock_products
+    - catalog_excludes_hard_blocked
+    - catalog_missing_service_key_returns_401
+    - catalog_response_has_no_cost_price
+    - batch_ids_returns_visible_subset
+    """
+    if viewer.mode == "service":
+        id_list = None
+        if ids is not None:
+            try:
+                id_list = [UUID(token.strip()) for token in ids.split(",") if token.strip()]
+            except ValueError:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={
+                        "code": "INVALID_REQUEST",
+                        "message": "ids must be comma-separated UUIDs",
+                    },
+                )
+        if id_list is not None:
+            # Batch request — return every visible item from the list (no paging).
+            eff_limit, eff_offset = min(max(len(id_list), 1), 100), 0
+        else:
+            eff_limit, eff_offset = limit, offset
+        products, total_count = await ProductService.list_catalog_products(
+            db,
+            limit=eff_limit,
+            offset=eff_offset,
+            category_id=category_id,
+            search=search,
+            sort=sort,
+            ids=id_list,
+        )
+        return ProductPublicPaginatedResponse(
+            items=[ProductPublicResponse.model_validate(product) for product in products],
+            total_count=total_count,
+            limit=eff_limit,
+            offset=eff_offset,
+        )
+
     products, total_count = await ProductService.list_seller_products(
         db=db,
-        seller_id=current_seller.id,
+        seller_id=viewer.seller_id,
         limit=limit,
         offset=offset,
         status=status_filter,
@@ -498,64 +615,6 @@ async def delete_product(
 
 
 # ───────────────────── US-B2B-05: view product card ─────────────────────
-
-class _ProductViewer:
-    """Resolved caller of GET /products/{id}: seller-cabinet or cross-service."""
-
-    def __init__(self, mode: str, seller_id: Optional[UUID] = None):
-        self.mode = mode  # "seller" | "service"
-        self.seller_id = seller_id
-
-
-_optional_bearer = HTTPBearer(auto_error=False)
-
-
-def _unauthorized() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail={"code": "UNAUTHORIZED", "message": "Could not validate credentials"},
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-
-async def get_product_viewer(
-    x_service_key: Optional[str] = Header(None, alias="X-Service-Key"),
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_optional_bearer),
-    db: AsyncSession = Depends(get_db),
-) -> _ProductViewer:
-    """
-    Resolve the caller of GET /products/{id} (US-B2B-05):
-    - X-Service-Key header → cross-service view (B2C catalog / Moderation);
-    - Bearer JWT → seller-cabinet view (seller_id из JWT claims);
-    - neither → 401.
-
-    Single dependency → the endpoint picks the response schema by `mode`,
-    so sensitive fields are dropped by the schema itself, not by ad-hoc logic.
-    """
-    if x_service_key:
-        expected = os.getenv("SERVICE_API_KEY", "dev-service-key")
-        if x_service_key != expected:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"code": "UNAUTHORIZED", "message": "Invalid service key"},
-            )
-        return _ProductViewer(mode="service")
-
-    if credentials is None:
-        raise _unauthorized()
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
-        if sub is None:
-            raise ValueError("missing sub")
-        seller_id = UUID(sub)
-    except (JWTError, ValueError):
-        raise _unauthorized()
-
-    seller = await db.get(Seller, seller_id)
-    if seller is None:
-        raise _unauthorized()
-    return _ProductViewer(mode="seller", seller_id=seller.id)
 
 
 @router.get(

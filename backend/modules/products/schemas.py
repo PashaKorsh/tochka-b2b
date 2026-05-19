@@ -306,3 +306,14 @@ class ProductPublicResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProductPublicPaginatedResponse(BaseModel):
+    """
+    Paginated B2C catalog response (US-B2B-07).
+    Items are public product cards — без cost_price / reserved_quantity.
+    """
+    items: List[ProductPublicResponse]
+    total_count: int
+    limit: int
+    offset: int
