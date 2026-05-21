@@ -616,6 +616,91 @@ class ProductService:
         )
 
     @staticmethod
+    async def delete_sku(
+        db: AsyncSession,
+        sku_id: UUID,
+        seller_id: UUID,
+    ) -> None:
+        """
+        Delete a single SKU (US-B2B-12, DELETE /api/v1/skus/{sku_id}).
+
+        Guardrails ordered per canon b2b-flows.md#delete-sku ("Прочее"):
+        1. SKU exists                         → иначе 404.
+        2. Parent product owned by seller_id  → иначе 403 NOT_OWNER.
+        3. Parent NOT HARD_BLOCKED            → иначе 403 (терминальный статус).
+        4. SKU.reserved_quantity == 0         → иначе 409 (есть активные резервы).
+        5. Delete + side-effects:
+           - если это был последний SKU у товара в статусе ON_MODERATION →
+             товар возвращается в CREATED + событие DELETED в Moderation
+             (товар покидает очередь модерации);
+           - иначе, если родитель MODERATED и у удалённого SKU был active>0 →
+             событие SKU_OUT_OF_STOCK в B2C (variant исчез из каталога).
+
+        Raises:
+            ValueError: SKU not found / NOT_OWNER / HARD_BLOCKED /
+                        SKU has active reserves.
+        """
+        # Lazy import — avoids a top-level cycle products ↔ inventory.
+        from backend.modules.inventory.service import InventoryService
+
+        sku_result = await db.execute(select(SKU).where(SKU.id == sku_id))
+        sku = sku_result.scalar_one_or_none()
+        if sku is None:
+            raise ValueError("SKU not found")
+
+        # Lock the parent product — serialises concurrent SKU edits/deletes
+        # and gives us product.skus (including the one we're deleting) so
+        # we can decide "last SKU" deterministically.
+        product_result = await db.execute(
+            select(Product)
+            .options(selectinload(Product.skus))
+            .where(Product.id == sku.product_id)
+            .with_for_update()
+        )
+        product = product_result.scalar_one_or_none()
+        if product is None:
+            # Data integrity guard — surface as not-found, not as 500.
+            raise ValueError("SKU not found")
+        if product.seller_id != seller_id:
+            raise ValueError("NOT_OWNER: Product does not belong to the authenticated seller")
+        # Canon order: HARD_BLOCKED check BEFORE the reserves check.
+        if product.status == ProductStatus.HARD_BLOCKED:
+            raise ValueError("HARD_BLOCKED: Cannot edit a hard-blocked product")
+        if sku.reserved_quantity > 0:
+            raise ValueError("SKU has active reserves")
+
+        had_active_stock = (sku.stock_quantity - sku.reserved_quantity) > 0
+        was_last_sku = len(product.skus) == 1
+        was_on_moderation = product.status == ProductStatus.ON_MODERATION
+        was_moderated = product.status == ProductStatus.MODERATED
+        product_id = product.id
+
+        await db.delete(sku)
+
+        # Last SKU on ON_MODERATION → product leaves the moderation queue.
+        should_transition = was_last_sku and was_on_moderation
+        if should_transition:
+            product.status = ProductStatus.CREATED
+
+        await db.commit()
+
+        # Side-effects — fire-and-forget after the DB is consistent.
+        if should_transition:
+            await ProductService._send_moderation_event(
+                product_id=product_id,
+                seller_id=seller_id,
+                event_type="DELETED",
+                idempotency_key=str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"neomarket:b2b:product_queue_emptied:{product_id}",
+                )),
+            )
+        elif was_moderated and had_active_stock:
+            # The variant vanished while the product is still publicly listed —
+            # tell B2C to mark cart/wishlist items as unavailable.
+            await InventoryService._send_sku_out_of_stock(product_id, sku_id)
+
+    @staticmethod
     async def list_seller_products(
         db: AsyncSession,
         seller_id: UUID,

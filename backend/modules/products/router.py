@@ -693,3 +693,68 @@ async def get_product(
         ),
         field_reports=[FieldReportResponse.model_validate(report) for report in field_reports],
     )
+
+
+@router.delete(
+    "/skus/{sku_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        204: {"description": "SKU deleted"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        403: {"model": ErrorResponse, "description": "HARD_BLOCKED or not owned by seller"},
+        404: {"model": ErrorResponse, "description": "SKU not found"},
+        409: {"model": ErrorResponse, "description": "SKU has active reserves"},
+    },
+    summary="Удалить SKU (US-B2B-12)",
+    description="""
+    Удаление варианта товара продавцом.
+
+    Guardrails (canon b2b-flows.md#delete-sku, порядок важен):
+    1. SKU существует → иначе 404
+    2. Родитель принадлежит продавцу (JWT) → иначе 403 NOT_OWNER
+    3. Родитель НЕ HARD_BLOCKED → иначе 403 FORBIDDEN
+    4. reserved_quantity == 0 → иначе 409 (есть активные резервы)
+
+    Каскадные эффекты:
+    - Последний SKU + товар ON_MODERATION → товар → CREATED + событие DELETED в Moderation
+    - Иначе, если родитель MODERATED и у удалённого SKU был active>0 →
+      событие SKU_OUT_OF_STOCK в B2C
+
+    Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):
+    - Path:     DELETE /api/v1/skus/{sku_id}
+    - Success:  204 No Content
+    """,
+)
+async def delete_sku(
+    sku_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_seller: Seller = Depends(get_current_seller),
+):
+    """
+    DELETE /api/v1/skus/{sku_id} - Delete a SKU (US-B2B-12).
+
+    Canon test scenarios:
+    - delete_sku_succeeds
+    - delete_sku_with_active_reserves_returns_409
+    - last_sku_on_moderation_transitions_product_to_created
+    - delete_sku_hard_blocked_product_returns_403
+    - sku_out_of_stock_event_on_moderated_product
+    """
+    try:
+        await ProductService.delete_sku(
+            db=db,
+            sku_id=sku_id,
+            seller_id=current_seller.id,
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except ValueError as e:
+        error_msg = str(e)
+        if "SKU has active reserves" in error_msg:
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"code": "CONFLICT", "message": "SKU has active reserves"},
+            )
+        response = _edit_error_response(error_msg)
+        if response is not None:
+            return response
+        raise
