@@ -623,19 +623,23 @@ class ProductService:
         offset: int = 0,
         status: Optional[ProductStatus] = None,
         include_deleted: bool = False,
+        search: Optional[str] = None,
     ) -> tuple[list[Product], int]:
         """
-        List the seller's own products (US-B2B-04, GET /api/v1/products).
+        List the seller's own products (US-B2B-04 / US-B2B-11, GET /api/v1/products).
 
-        Soft-deleted products are excluded by default (include_deleted=False) —
-        удалённый товар не виден в стандартном списке продавца. Returns the page
-        of products together with the total count for pagination metadata.
+        `seller_id` ВСЕГДА из JWT — клиент не может передать его в query.
+        Soft-deleted products are excluded by default (include_deleted=False).
+        `search` — case-insensitive ILIKE по title.
+        Returns the page of products together with the total count.
         """
         filters = [Product.seller_id == seller_id]
         if not include_deleted:
             filters.append(Product.deleted.is_(False))
         if status is not None:
             filters.append(Product.status == status)
+        if search:
+            filters.append(Product.title.ilike(f"%{search}%"))
 
         total_result = await db.execute(
             select(func.count()).select_from(Product).where(*filters)

@@ -200,11 +200,14 @@ class SKUUpdate(BaseModel):
 
 class ProductShortResponse(BaseModel):
     """
-    Compact product card for the seller's product list (US-B2B-04).
-    Matches spec b2b/neomarket-b2b.yaml#ProductShortResponse.
+    Compact product card for the seller's product list (US-B2B-04 / US-B2B-11).
+    Matches spec b2b/neomarket-b2b.yaml#ProductShortResponse plus the seller-
+    cabinet aggregates from canon b2b-flows.md#list-products.
 
     `min_price` — минимальная цена среди SKU (None, если SKU нет).
     `cover_image` — URL первого изображения по `ordering` (None, если изображений нет).
+    `skus_count` — число вариантов товара.
+    `total_active_quantity` — суммарно доступно к продаже (Σ active_quantity SKU).
     """
     id: UUID
     title: str
@@ -215,6 +218,8 @@ class ProductShortResponse(BaseModel):
     created_at: datetime
     min_price: Optional[int] = None
     cover_image: Optional[str] = None
+    skus_count: int = 0
+    total_active_quantity: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
