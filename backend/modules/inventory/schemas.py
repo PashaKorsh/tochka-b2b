@@ -56,3 +56,16 @@ class ReserveConflictResponse(BaseModel):
 
 class UnreserveResponse(BaseModel):
     ok: bool = True
+
+
+class FulfillRequest(BaseModel):
+    """
+    Request for POST /api/v1/fulfill (US-B2B-10).
+    Same shape as unreserve — `order_id` служит ключом идемпотентности.
+    """
+    order_id: UUID = Field(..., description="ID заказа — ключ идемпотентности fulfill")
+    items: List[InventoryItem] = Field(default_factory=list)
+
+
+class FulfillResponse(BaseModel):
+    ok: bool = True
