@@ -176,6 +176,59 @@ class InventoryService:
         return result_json
 
     @staticmethod
+    async def fulfill(
+        db: AsyncSession,
+        order_id: UUID,
+        items: list,
+    ) -> dict:
+        """
+        Finalise a delivered order (US-B2B-10, canon b2b-flows.md#fulfill-delivery).
+
+        Decrements BOTH `stock_quantity` and `reserved_quantity` by the same
+        amount — the goods physically left the warehouse. Поэтому
+        active_quantity (= stock − reserved) НЕ меняется.
+
+        Idempotent by `order_id` via the inventory_operations log — повтор
+        возвращает {"ok": True} без повторного списания.
+
+        Raises:
+            ValueError: SKU not found / quantity <= 0.
+        """
+        op_key = f"fulfill:{order_id}"
+        existing = await db.get(InventoryOperation, op_key)
+        if existing is not None:
+            return existing.result_json
+
+        for item in items:
+            if item.quantity <= 0:
+                raise ValueError("quantity must be > 0")
+
+        requested = _aggregate(items)
+        if requested:
+            result = await db.execute(
+                select(SKU)
+                .where(SKU.id.in_(list(requested.keys())))
+                .order_by(SKU.id)
+                .with_for_update()
+            )
+            skus = {sku.id: sku for sku in result.scalars().all()}
+
+            for sku_id in requested:
+                if sku_id not in skus:
+                    raise ValueError("SKU not found")
+
+            for sku_id, qty in requested.items():
+                sku = skus[sku_id]
+                # Decrement both — товар уехал к покупателю; clamp at 0 for safety.
+                sku.stock_quantity = max(0, sku.stock_quantity - qty)
+                sku.reserved_quantity = max(0, sku.reserved_quantity - qty)
+
+        result_json = {"ok": True}
+        db.add(InventoryOperation(operation_key=op_key, result_json=result_json))
+        await db.commit()
+        return result_json
+
+    @staticmethod
     async def _send_sku_out_of_stock(product_id: UUID, sku_id: UUID) -> None:
         """
         Notify B2C that a SKU's active_quantity hit 0 (canon b2b-flows.md#reserve-sku).

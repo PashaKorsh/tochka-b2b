@@ -9,7 +9,7 @@ from backend.database import get_db
 from backend.modules.products.schemas import ErrorResponse
 from backend.modules.inventory.schemas import (
     ReserveRequest, UnreserveRequest, ReserveResponse, ReserveConflictResponse,
-    UnreserveResponse,
+    UnreserveResponse, FulfillRequest, FulfillResponse,
 )
 from backend.modules.inventory.service import InventoryService, ReserveConflict
 
@@ -134,6 +134,54 @@ async def unreserve(
     """
     try:
         result = await InventoryService.unreserve(
+            db=db,
+            order_id=request.order_id,
+            items=request.items,
+        )
+        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+    except ValueError as e:
+        response = _value_error_response(str(e))
+        if response is not None:
+            return response
+        raise
+
+
+@router.post(
+    "/fulfill",
+    response_model=None,
+    responses={
+        200: {"model": FulfillResponse, "description": "Reservation fulfilled (delivered)"},
+        400: {"model": ErrorResponse, "description": "Invalid quantity"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        404: {"model": ErrorResponse, "description": "SKU not found"},
+    },
+    summary="Списать резерв при доставке (US-B2B-10)",
+    description="""
+    Финальная точка жизненного цикла резерва. Вызывается B2C при доставке
+    заказа покупателю (X-Service-Key).
+
+    Бизнес-логика (canon b2b-flows.md#fulfill-delivery):
+    - reserved_quantity -= qty И stock_quantity -= qty (товар физически уехал);
+    - active_quantity (= stock − reserved) НЕ меняется;
+    - идемпотентность по order_id — повтор от B2C (retry после таймаута) не
+      приводит к двойному списанию.
+    """,
+)
+async def fulfill(
+    request: FulfillRequest,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_key),
+):
+    """
+    POST /api/v1/fulfill - Fulfill a reservation (US-B2B-10).
+
+    Canon test scenarios:
+    - fulfill_decreases_reserved_quantity
+    - active_quantity_unchanged
+    - idempotent_fulfill_no_double_deduction
+    """
+    try:
+        result = await InventoryService.fulfill(
             db=db,
             order_id=request.order_id,
             items=request.items,
