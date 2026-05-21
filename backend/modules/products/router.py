@@ -439,10 +439,17 @@ async def update_sku(
 
 def _to_short_response(product) -> ProductShortResponse:
     """
-    Build a ProductShortResponse from a Product (US-B2B-04 list view).
-    `min_price` — минимальная цена SKU; `cover_image` — первое изображение по ordering.
+    Build a ProductShortResponse from a Product (US-B2B-04 / US-B2B-11 list view).
+
+    Derived from the SKUs / images already loaded via selectinload:
+    - min_price        — минимальная цена SKU;
+    - cover_image      — первое изображение по ordering;
+    - skus_count       — число SKU;
+    - total_active_quantity — Σ (stock_quantity − reserved_quantity) по SKU.
     """
-    prices = [sku.price for sku in product.skus]
+    skus = product.skus
+    prices = [sku.price for sku in skus]
+    total_active = sum(sku.stock_quantity - sku.reserved_quantity for sku in skus)
     cover_image = None
     if product.images:
         cover_image = min(product.images, key=lambda img: img.ordering).url
@@ -456,6 +463,8 @@ def _to_short_response(product) -> ProductShortResponse:
         created_at=product.created_at,
         min_price=min(prices) if prices else None,
         cover_image=cover_image,
+        skus_count=len(skus),
+        total_active_quantity=total_active,
     )
 
 
@@ -549,6 +558,7 @@ async def list_products(
         offset=offset,
         status=status_filter,
         include_deleted=include_deleted,
+        search=search,
     )
     return ProductPaginatedResponse(
         items=[_to_short_response(product) for product in products],
