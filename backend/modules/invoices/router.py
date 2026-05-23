@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/v1", tags=["Invoices"])
     response_model=InvoiceResponse,
     status_code=status.HTTP_201_CREATED,
     responses={
-        201: {"description": "Invoice created (status PENDING)"},
+        201: {"description": "Invoice created (status CREATED)"},
         400: {"model": ErrorResponse, "description": "Empty items / bad quantity / non-MODERATED SKU"},
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         403: {"model": ErrorResponse, "description": "SKU belongs to another seller"},
@@ -35,7 +35,7 @@ router = APIRouter(prefix="/api/v1", tags=["Invoices"])
     - quantity каждой позиции > 0 → иначе 400
     - SKU существует → иначе 404
     - родительский товар SKU в статусе MODERATED → иначе 400
-    - накладная создаётся в статусе PENDING; accepted_quantity=null
+    - накладная создаётся в статусе CREATED; accepted_quantity=null
       (заполняется при приёмке — отдельный flow)
 
     Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):

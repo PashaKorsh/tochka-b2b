@@ -10,10 +10,11 @@ from backend.database import Base
 
 class InvoiceStatus(str, enum.Enum):
     """
-    Invoice lifecycle. На создании — PENDING (канон b2b-flows.md#create-invoice).
-    Остальные значения наступают при приёмке накладной складом (отдельный flow).
+    Invoice lifecycle, matching spec b2b/neomarket-b2b.yaml#InvoiceStatus:
+    [CREATED, PARTIALLY_ACCEPTED, ACCEPTED, CANCELLED]. На создании — CREATED;
+    остальные значения наступают при приёмке накладной складом (отдельный flow).
     """
-    PENDING = "PENDING"
+    CREATED = "CREATED"
     PARTIALLY_ACCEPTED = "PARTIALLY_ACCEPTED"
     ACCEPTED = "ACCEPTED"
     CANCELLED = "CANCELLED"
@@ -24,7 +25,7 @@ class Invoice(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     seller_id = Column(UUID(as_uuid=True), ForeignKey("sellers.id"), nullable=False)
-    status = Column(SQLEnum(InvoiceStatus), default=InvoiceStatus.PENDING, nullable=False)
+    status = Column(SQLEnum(InvoiceStatus), default=InvoiceStatus.CREATED, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     # Populated when the warehouse accepts the invoice (separate acceptance flow).

@@ -59,7 +59,7 @@ class InvoiceService:
             if product.status != ProductStatus.MODERATED:
                 raise ValueError("Invoice can only be created for MODERATED products")
 
-        invoice = Invoice(seller_id=seller_id, status=InvoiceStatus.PENDING)
+        invoice = Invoice(seller_id=seller_id, status=InvoiceStatus.CREATED)
         db.add(invoice)
         await db.flush()
 
