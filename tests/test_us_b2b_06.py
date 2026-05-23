@@ -146,7 +146,8 @@ async def test_create_invoice_with_moderated_sku_returns_201(
     client, db_session, seller, category
 ):
     """
-    Canon happy path: накладная на SKU MODERATED-товара — 201, статус PENDING.
+    Canon happy path: накладная на SKU MODERATED-товара — 201, статус CREATED
+    (spec b2b/neomarket-b2b.yaml#InvoiceStatus).
     """
     product = await make_product(db_session, seller, category, ProductStatus.MODERATED)
     sku = await make_sku(db_session, product)
@@ -160,7 +161,7 @@ async def test_create_invoice_with_moderated_sku_returns_201(
 
     assert response.status_code == 201
     data = response.json()
-    assert data["status"] == "PENDING"
+    assert data["status"] == "CREATED"
     assert data["seller_id"] == str(seller.id)
     assert len(data["items"]) == 1
     assert data["items"][0]["sku_id"] == str(sku.id)

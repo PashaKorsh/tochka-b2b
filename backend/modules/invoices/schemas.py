@@ -40,7 +40,7 @@ class InvoiceItemResponse(BaseModel):
 class InvoiceResponse(BaseModel):
     """
     Response schema for POST /api/v1/invoices (201), spec#InvoiceResponse.
-    Накладная создаётся в статусе PENDING (канон b2b-flows.md#create-invoice).
+    Накладная создаётся в статусе CREATED (spec b2b/neomarket-b2b.yaml#InvoiceStatus).
     """
     id: UUID
     seller_id: UUID
