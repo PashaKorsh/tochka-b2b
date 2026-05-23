@@ -1,12 +1,14 @@
 """
 US-B2B-09: Apply Moderation decision.
 
-Canon flow b2b-flows.md#apply-moderation. Covered scenarios:
+Canon flow b2b-flows.md#apply-moderation; contract
+spec b2b/neomarket-b2b.yaml#ModerationEventRequest. Covered scenarios:
 - moderated_event_clears_blocking_data
 - blocked_soft_saves_field_reports
 - blocked_hard_sets_terminal_status
 - hard_blocked_product_rejects_seller_edits
 - duplicate_event_same_idempotency_key_no_side_effects
+- duplicate_event_does_not_refire_b2c_cascade
 plus missing service key (401).
 """
 import os
@@ -19,7 +21,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.pool import NullPool
 from uuid import uuid4
 from jose import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock
 
 from backend.main import app
@@ -43,13 +45,18 @@ TestSessionLocal = async_sessionmaker(
     expire_on_commit=False,
 )
 
+EVENTS_URL = "/api/v1/moderation/events"
 SERVICE_HEADERS = {"X-Service-Key": "dev-service-key"}
 _CASCADE = "backend.modules.products.service.ProductService._send_b2c_event"
 
 
+def _occurred_at() -> str:
+    """Spec ModerationEventRequest.occurred_at — date-time (ISO 8601)."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
 @pytest_asyncio.fixture
 async def db_session():
-    """Create test database tables and provide session"""
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
@@ -61,7 +68,6 @@ async def db_session():
 
 @pytest_asyncio.fixture
 async def client(db_session):
-    """Create test client with database override"""
     async def override_get_db():
         yield db_session
 
@@ -78,7 +84,6 @@ async def client(db_session):
 
 @pytest_asyncio.fixture
 async def seller(db_session):
-    """Create test seller"""
     seller = Seller(
         id=uuid4(),
         email="seller@test.com",
@@ -95,7 +100,6 @@ async def seller(db_session):
 
 @pytest_asyncio.fixture
 async def category(db_session):
-    """Create test category"""
     category = Category(id=uuid4(), name="Test Category")
     db_session.add(category)
     await db_session.commit()
@@ -104,7 +108,6 @@ async def category(db_session):
 
 
 def create_access_token(seller_id: str) -> str:
-    """Create JWT token for testing"""
     to_encode = {"sub": seller_id, "exp": datetime.utcnow() + timedelta(hours=1)}
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -115,7 +118,6 @@ async def make_product(
     blocking_reason_id=None,
     moderator_comment=None,
 ):
-    """Persist a product."""
     product = Product(
         id=uuid4(),
         seller_id=seller.id,
@@ -156,7 +158,7 @@ async def count_field_reports(db_session, product_id):
 
 @pytest.mark.asyncio
 async def test_moderated_event_clears_blocking_data(client, db_session, seller, category):
-    """Canon: status=MODERATED → товар MODERATED, blocking_reason и field_reports очищены."""
+    """Canon: event_type=MODERATED → товар MODERATED, blocking_reason и field_reports очищены."""
     product = await make_product(
         db_session, seller, category,
         status=ProductStatus.BLOCKED,
@@ -166,16 +168,18 @@ async def test_moderated_event_clears_blocking_data(client, db_session, seller, 
     await make_field_report(db_session, product, "title", "stale remark")
 
     response = await client.post(
-        "/api/v1/events/moderation",
+        EVENTS_URL,
         json={
             "idempotency_key": str(uuid4()),
             "product_id": str(product.id),
-            "status": "MODERATED",
+            "event_type": "MODERATED",
+            "occurred_at": _occurred_at(),
         },
         headers=SERVICE_HEADERS,
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 204
+    assert response.content == b""
 
     await db_session.refresh(product)
     assert product.status == ProductStatus.MODERATED
@@ -193,17 +197,15 @@ async def test_blocked_soft_saves_field_reports(client, db_session, seller, cate
 
     with patch(_CASCADE, new_callable=AsyncMock) as mock_cascade:
         response = await client.post(
-            "/api/v1/events/moderation",
+            EVENTS_URL,
             json={
                 "idempotency_key": str(uuid4()),
                 "product_id": str(product.id),
-                "status": "BLOCKED",
+                "event_type": "BLOCKED",
+                "occurred_at": _occurred_at(),
                 "hard_block": False,
-                "blocking_reason": {
-                    "id": str(reason_id),
-                    "title": "Запрещённый контент",
-                    "comment": "Замените описание и фото.",
-                },
+                "blocking_reason_id": str(reason_id),
+                "moderator_comment": "Замените описание и фото.",
                 "field_reports": [
                     {"field_name": "title", "comment": "Запрещённое слово."},
                     {"field_name": "description", "comment": "Недостоверно."},
@@ -212,7 +214,7 @@ async def test_blocked_soft_saves_field_reports(client, db_session, seller, cate
             headers=SERVICE_HEADERS,
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 204
 
     await db_session.refresh(product)
     assert product.status == ProductStatus.BLOCKED
@@ -233,17 +235,15 @@ async def test_blocked_hard_sets_terminal_status(client, db_session, seller, cat
 
     with patch(_CASCADE, new_callable=AsyncMock) as mock_cascade:
         response = await client.post(
-            "/api/v1/events/moderation",
+            EVENTS_URL,
             json={
                 "idempotency_key": str(uuid4()),
                 "product_id": str(product.id),
-                "status": "BLOCKED",
+                "event_type": "BLOCKED",
+                "occurred_at": _occurred_at(),
                 "hard_block": True,
-                "blocking_reason": {
-                    "id": str(uuid4()),
-                    "title": "Грубое нарушение",
-                    "comment": "Товар снят навсегда.",
-                },
+                "blocking_reason_id": str(uuid4()),
+                "moderator_comment": "Товар снят навсегда.",
                 "field_reports": [
                     {"field_name": "title", "comment": "ignored on hard block"},
                 ],
@@ -251,7 +251,7 @@ async def test_blocked_hard_sets_terminal_status(client, db_session, seller, cat
             headers=SERVICE_HEADERS,
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 204
 
     await db_session.refresh(product)
     assert product.status == ProductStatus.HARD_BLOCKED
@@ -289,39 +289,67 @@ async def test_hard_blocked_product_rejects_seller_edits(client, db_session, sel
 async def test_duplicate_event_same_idempotency_key_no_side_effects(
     client, db_session, seller, category
 ):
-    """Canon: повторное событие с тем же idempotency_key → 200 без изменений."""
+    """Canon: повторное событие с тем же idempotency_key → 204 без изменений."""
     product = await make_product(db_session, seller, category)
     key = str(uuid4())
     blocked_event = {
         "idempotency_key": key,
         "product_id": str(product.id),
-        "status": "BLOCKED",
+        "event_type": "BLOCKED",
+        "occurred_at": _occurred_at(),
         "hard_block": False,
-        "blocking_reason": {"id": str(uuid4()), "title": "Reason", "comment": "fix it"},
+        "blocking_reason_id": str(uuid4()),
+        "moderator_comment": "fix it",
         "field_reports": [{"field_name": "title", "comment": "bad"}],
     }
 
     with patch(_CASCADE, new_callable=AsyncMock):
-        first = await client.post(
-            "/api/v1/events/moderation", json=blocked_event, headers=SERVICE_HEADERS
-        )
-        assert first.status_code == 200
+        first = await client.post(EVENTS_URL, json=blocked_event, headers=SERVICE_HEADERS)
+        assert first.status_code == 204
 
         await db_session.refresh(product)
         assert product.status == ProductStatus.BLOCKED
 
         # Replay with the SAME idempotency_key but a different decision —
         # must be ignored as a duplicate.
-        replay = dict(blocked_event, status="MODERATED")
-        second = await client.post(
-            "/api/v1/events/moderation", json=replay, headers=SERVICE_HEADERS
-        )
+        replay = dict(blocked_event, event_type="MODERATED")
+        second = await client.post(EVENTS_URL, json=replay, headers=SERVICE_HEADERS)
 
-    assert second.status_code == 200
+    assert second.status_code == 204
     await db_session.refresh(product)
     # Still BLOCKED — the duplicate event had no side effects.
     assert product.status == ProductStatus.BLOCKED
     assert await count_field_reports(db_session, product.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_event_does_not_refire_b2c_cascade(
+    client, db_session, seller, category
+):
+    """
+    Idempotency invariant: повтор события не должен повторно отправлять
+    каскад PRODUCT_BLOCKED в B2C (иначе покупатели получат двойное уведомление).
+    """
+    product = await make_product(db_session, seller, category)
+    key = str(uuid4())
+    blocked_event = {
+        "idempotency_key": key,
+        "product_id": str(product.id),
+        "event_type": "BLOCKED",
+        "occurred_at": _occurred_at(),
+        "blocking_reason_id": str(uuid4()),
+        "moderator_comment": "first time",
+    }
+
+    with patch(_CASCADE, new_callable=AsyncMock) as mock_cascade:
+        first = await client.post(EVENTS_URL, json=blocked_event, headers=SERVICE_HEADERS)
+        assert first.status_code == 204
+        assert mock_cascade.await_count == 1
+
+        second = await client.post(EVENTS_URL, json=blocked_event, headers=SERVICE_HEADERS)
+        assert second.status_code == 204
+        # Cascade was NOT invoked on the duplicate event.
+        assert mock_cascade.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -330,11 +358,12 @@ async def test_missing_service_key_returns_401(client, db_session, seller, categ
     product = await make_product(db_session, seller, category)
 
     response = await client.post(
-        "/api/v1/events/moderation",
+        EVENTS_URL,
         json={
             "idempotency_key": str(uuid4()),
             "product_id": str(product.id),
-            "status": "MODERATED",
+            "event_type": "MODERATED",
+            "occurred_at": _occurred_at(),
         },
     )
 
