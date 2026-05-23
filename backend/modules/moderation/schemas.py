@@ -1,17 +1,22 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from datetime import datetime
+from enum import Enum
+from typing import List, Optional
 from uuid import UUID
 
+from pydantic import BaseModel, Field
 
-class ModerationBlockingReason(BaseModel):
-    """Blocking reason carried by a BLOCKED moderation event (canon: {id, title, comment})."""
-    id: UUID
-    title: str
-    comment: Optional[str] = None
+
+class ModerationEventType(str, Enum):
+    """Spec b2b/neomarket-b2b.yaml#ModerationEventType."""
+    MODERATED = "MODERATED"
+    BLOCKED = "BLOCKED"
 
 
 class FieldReportInput(BaseModel):
-    """Per-field violation detail. `sku_id` is None for product-level issues."""
+    """
+    Per-field violation detail (spec b2b/neomarket-b2b.yaml#FieldReport).
+    `sku_id` is None for product-level issues.
+    """
     field_name: str
     sku_id: Optional[UUID] = None
     comment: str
@@ -21,14 +26,20 @@ class ModerationEvent(BaseModel):
     """
     Inbound event from the Moderation service (US-B2B-09).
 
-    Shape from canon b2b-flows.md#apply-moderation:
-    - status: MODERATED | BLOCKED;
-    - hard_block: actual only for BLOCKED (default false);
-    - blocking_reason / field_reports: present for BLOCKED.
+    Strict shape from spec b2b/neomarket-b2b.yaml#ModerationEventRequest:
+    required: [idempotency_key, product_id, event_type, occurred_at];
+    plus nullable moderator_id / moderator_comment / blocking_reason_id /
+    field_reports and a default-false hard_block flag.
     """
-    idempotency_key: str = Field(..., min_length=1)
+    idempotency_key: UUID = Field(..., description="UUID — spec format: uuid")
     product_id: UUID
-    status: str = Field(..., description="MODERATED | BLOCKED")
+    event_type: ModerationEventType
+    moderator_id: Optional[UUID] = None
+    moderator_comment: Optional[str] = None
+    blocking_reason_id: Optional[UUID] = Field(
+        default=None,
+        description="UUID-скаляр причины из каталога Moderation; обязательно при BLOCKED",
+    )
     hard_block: bool = False
-    blocking_reason: Optional[ModerationBlockingReason] = None
     field_reports: Optional[List[FieldReportInput]] = None
+    occurred_at: datetime

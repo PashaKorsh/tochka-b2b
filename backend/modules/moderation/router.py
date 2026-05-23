@@ -1,7 +1,7 @@
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,7 +11,7 @@ from backend.modules.moderation.schemas import ModerationEvent
 from backend.modules.moderation.service import ModerationService
 
 
-router = APIRouter(prefix="/api/v1", tags=["Moderation Events"])
+router = APIRouter(prefix="/api/v1/moderation", tags=["Moderation Events"])
 
 
 def require_service_key(
@@ -30,27 +30,38 @@ def require_service_key(
 
 
 @router.post(
-    "/events/moderation",
+    "/events",
+    status_code=status.HTTP_204_NO_CONTENT,
     response_model=None,
     responses={
-        200: {"description": "Moderation decision applied (or duplicate ignored)"},
-        400: {"model": ErrorResponse, "description": "Invalid event"},
+        204: {"description": "Moderation decision applied (or duplicate ignored)"},
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         404: {"model": ErrorResponse, "description": "Product not found"},
+        422: {"description": "Validation Error"},
     },
     summary="Применить решение модерации (US-B2B-09)",
     description="""
     Приём события от сервиса Moderation (X-Service-Key).
 
-    Бизнес-логика (canon b2b-flows.md#apply-moderation), три пути:
-    - status=MODERATED → товар MODERATED, blocked=false, blocking_reason и
-      field_reports очищены;
-    - status=BLOCKED, hard_block=false → BLOCKED, сохраняем blocking_reason и
-      field_reports, каскад PRODUCT_BLOCKED в B2C;
-    - status=BLOCKED, hard_block=true → HARD_BLOCKED (терминальный статус),
-      сохраняем blocking_reason, каскад PRODUCT_BLOCKED в B2C.
+    Контракт (spec b2b/neomarket-b2b.yaml#ModerationEventRequest):
+    - path: POST /api/v1/moderation/events;
+    - тело: idempotency_key (uuid), product_id (uuid), event_type
+      (MODERATED|BLOCKED), occurred_at (date-time), опционально
+      moderator_id / moderator_comment / blocking_reason_id (uuid) /
+      hard_block / field_reports;
+    - успех: 204 No Content (тело не возвращается).
 
-    Идемпотентность по idempotency_key — повторное событие → 200 без изменений.
+    Бизнес-логика (canon b2b-flows.md#apply-moderation), три пути:
+    - event_type=MODERATED → товар MODERATED, blocked=false,
+      blocking_reason_id/moderator_comment и field_reports очищены;
+    - event_type=BLOCKED, hard_block=false → BLOCKED, blocking_reason_id и
+      moderator_comment сохранены, field_reports сохранены,
+      каскад PRODUCT_BLOCKED в B2C;
+    - event_type=BLOCKED, hard_block=true → HARD_BLOCKED (терминальный),
+      blocking_reason_id и moderator_comment сохранены, каскад в B2C.
+
+    Идемпотентность по idempotency_key — повторное событие → 204 без изменений,
+    каскад в B2C на повторе НЕ вызывается.
     """,
 )
 async def apply_moderation_event(
@@ -59,7 +70,7 @@ async def apply_moderation_event(
     _: None = Depends(require_service_key),
 ):
     """
-    POST /api/v1/events/moderation - Apply a Moderation decision (US-B2B-09).
+    POST /api/v1/moderation/events - Apply a Moderation decision (US-B2B-09).
 
     Canon test scenarios:
     - moderated_event_clears_blocking_data
@@ -68,24 +79,12 @@ async def apply_moderation_event(
     - duplicate_event_same_idempotency_key_no_side_effects
     """
     try:
-        applied = await ModerationService.apply_event(db=db, event=event)
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={"ok": True, "applied": applied},
-        )
+        await ModerationService.apply_event(db=db, event=event)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     except ValueError as e:
-        error_msg = str(e)
-        if "Product not found" in error_msg:
+        if "Product not found" in str(e):
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
                 content={"code": "NOT_FOUND", "message": "Product not found"},
-            )
-        if "invalid status" in error_msg:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "code": "INVALID_REQUEST",
-                    "message": "status must be MODERATED or BLOCKED",
-                },
             )
         raise

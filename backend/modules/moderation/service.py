@@ -5,10 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.modules.moderation.models import ProcessedModerationEvent
-from backend.modules.moderation.schemas import ModerationEvent
-from backend.modules.products.models import (
-    BlockingReason, FieldReport, Product, ProductStatus, SKU,
-)
+from backend.modules.moderation.schemas import ModerationEvent, ModerationEventType
+from backend.modules.products.models import FieldReport, Product, ProductStatus
 from backend.modules.products.service import ProductService
 
 logger = logging.getLogger(__name__)
@@ -22,30 +20,34 @@ class ModerationService:
     @staticmethod
     async def apply_event(db: AsyncSession, event: ModerationEvent) -> bool:
         """
-        Apply a Moderation decision to a product (canon b2b-flows.md#apply-moderation).
+        Apply a Moderation decision to a product (canon b2b-flows.md#apply-moderation,
+        spec b2b/neomarket-b2b.yaml#ModerationEventRequest).
 
         Three paths:
-        - MODERATED            → status=MODERATED, blocked=false, blocking_reason
-                                 и field_reports очищены.
-        - BLOCKED hard_block=false → status=BLOCKED, blocked=true, сохраняем
-                                 blocking_reason и field_reports, каскад в B2C.
-        - BLOCKED hard_block=true  → status=HARD_BLOCKED (терминальный), blocked=true,
-                                 сохраняем только blocking_reason, каскад в B2C.
+        - event_type=MODERATED       → status=MODERATED, blocked=false,
+                                       blocking_reason_id / moderator_comment /
+                                       field_reports очищены.
+        - event_type=BLOCKED soft    → status=BLOCKED, blocked=true,
+                                       blocking_reason_id и moderator_comment
+                                       сохранены, field_reports сохранены, каскад в B2C.
+        - event_type=BLOCKED hard    → status=HARD_BLOCKED (терминальный),
+                                       blocked=true, сохраняем blocking_reason_id
+                                       и moderator_comment, каскад в B2C.
 
-        Idempotent by `idempotency_key`: повторное событие — no-op.
+        Idempotent by `idempotency_key`: повторное событие — no-op,
+        каскад в B2C на повторе не вызывается.
 
         Returns True if the event was applied, False if it was a duplicate.
 
         Raises:
-            ValueError: invalid status / Product not found.
+            ValueError: Product not found.
         """
-        # Idempotency — a duplicate event is a no-op.
-        already = await db.get(ProcessedModerationEvent, event.idempotency_key)
+        key_str = str(event.idempotency_key)
+
+        # Idempotency — a duplicate event is a no-op (cascade not re-fired).
+        already = await db.get(ProcessedModerationEvent, key_str)
         if already is not None:
             return False
-
-        if event.status not in ("MODERATED", "BLOCKED"):
-            raise ValueError("invalid status")
 
         # Lock the product row — serialises concurrent moderation events.
         result = await db.execute(
@@ -68,7 +70,7 @@ class ModerationService:
 
         cascade = False
 
-        if event.status == "MODERATED":
+        if event.event_type == ModerationEventType.MODERATED:
             product.status = ProductStatus.MODERATED
             product.blocked = False
             product.blocking_reason_id = None
@@ -79,19 +81,10 @@ class ModerationService:
                 ProductStatus.HARD_BLOCKED if event.hard_block else ProductStatus.BLOCKED
             )
             product.blocked = True
-
-            if event.blocking_reason is not None:
-                # Upsert the blocking-reason catalogue row (id + title from the event).
-                reason = await db.get(BlockingReason, event.blocking_reason.id)
-                if reason is None:
-                    db.add(BlockingReason(
-                        id=event.blocking_reason.id,
-                        title=event.blocking_reason.title,
-                    ))
-                else:
-                    reason.title = event.blocking_reason.title
-                product.blocking_reason_id = event.blocking_reason.id
-                product.moderator_comment = event.blocking_reason.comment
+            # spec: flat blocking_reason_id + separate moderator_comment.
+            # Title catalogue lives in Moderation; B2B stores только id-reference.
+            product.blocking_reason_id = event.blocking_reason_id
+            product.moderator_comment = event.moderator_comment
 
             # Soft block persists field reports; hard block keeps blocking_reason only.
             if not event.hard_block and event.field_reports:
@@ -104,7 +97,7 @@ class ModerationService:
                     ))
 
         sku_ids = [str(sku.id) for sku in product.skus]
-        db.add(ProcessedModerationEvent(idempotency_key=event.idempotency_key))
+        db.add(ProcessedModerationEvent(idempotency_key=key_str))
         await db.commit()
 
         # Cascade PRODUCT_BLOCKED to B2C on any block (soft or hard).
@@ -113,7 +106,7 @@ class ModerationService:
                 product_id=product.id,
                 sku_ids=sku_ids,
                 event_type="PRODUCT_BLOCKED",
-                idempotency_key=event.idempotency_key,
+                idempotency_key=key_str,
             )
 
         return True
