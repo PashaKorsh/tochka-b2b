@@ -190,17 +190,24 @@ class InventoryService:
         items: list,
     ) -> dict:
         """
-        Finalise a delivered order (US-B2B-10, canon b2b-flows.md#fulfill-delivery).
+        Finalise a delivered order (US-B2B-10, canon b2b-flows.md#fulfill-delivery,
+        spec b2b/neomarket-b2b.yaml#InventoryOrderResponse).
 
         Decrements BOTH `stock_quantity` and `reserved_quantity` by the same
         amount — the goods physically left the warehouse. Поэтому
         active_quantity (= stock − reserved) НЕ меняется.
 
         Idempotent by `order_id` via the inventory_operations log — повтор
-        возвращает {"ok": True} без повторного списания.
+        возвращает сохранённый ответ {order_id, status: FULFILLED, processed_at}
+        без повторного списания.
+
+        Canon (расхождение со старой реализацией): требуется явная проверка
+        `reserved_quantity >= quantity` — иначе резерв уходит в 0 «тихо»,
+        маскируя отказ. Поэтому при недостатке резерва бросаем ValueError
+        с маркером "insufficient reserved" → 409.
 
         Raises:
-            ValueError: SKU not found / quantity <= 0.
+            ValueError: SKU not found / quantity <= 0 / insufficient reserved.
         """
         op_key = f"fulfill:{order_id}"
         existing = await db.get(InventoryOperation, op_key)
@@ -225,13 +232,32 @@ class InventoryService:
                 if sku_id not in skus:
                     raise ValueError("SKU not found")
 
+            # All-or-nothing: validate reserved >= qty for every SKU before
+            # mutating any. Канон требует явной проверки, чтобы отказ был
+            # явным, а не маскировался clamp-ом до нуля.
             for sku_id, qty in requested.items():
                 sku = skus[sku_id]
-                # Decrement both — товар уехал к покупателю; clamp at 0 for safety.
-                sku.stock_quantity = max(0, sku.stock_quantity - qty)
-                sku.reserved_quantity = max(0, sku.reserved_quantity - qty)
+                if sku.reserved_quantity < qty:
+                    raise ValueError(
+                        f"insufficient reserved quantity for SKU {sku_id}: "
+                        f"reserved={sku.reserved_quantity}, requested={qty}"
+                    )
 
-        result_json = {"ok": True}
+            for sku_id, qty in requested.items():
+                sku = skus[sku_id]
+                sku.stock_quantity -= qty
+                sku.reserved_quantity -= qty
+
+        processed_at = (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+        result_json = {
+            "order_id": str(order_id),
+            "status": "FULFILLED",
+            "processed_at": processed_at,
+        }
         db.add(InventoryOperation(operation_key=op_key, result_json=result_json))
         await db.commit()
         return result_json

@@ -9,7 +9,7 @@ from backend.database import get_db
 from backend.modules.products.schemas import ErrorResponse
 from backend.modules.inventory.schemas import (
     ReserveRequest, UnreserveRequest, ReserveResponse, ReserveConflictResponse,
-    UnreserveResponse, FulfillRequest, FulfillResponse,
+    UnreserveResponse, FulfillRequest, InventoryOrderResponse,
 )
 from backend.modules.inventory.service import InventoryService, ReserveConflict
 
@@ -43,6 +43,13 @@ def _value_error_response(error_msg: str) -> Optional[JSONResponse]:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={"code": "INVALID_REQUEST", "message": "quantity must be > 0"},
+        )
+    if "insufficient reserved" in error_msg:
+        # Canon b2b-flows.md#fulfill-delivery: fulfilling more than the
+        # reserved amount must be an explicit refusal, not a silent clamp.
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"code": "CONFLICT", "message": error_msg},
         )
     return None
 
@@ -151,19 +158,27 @@ async def unreserve(
     "/fulfill",
     response_model=None,
     responses={
-        200: {"model": FulfillResponse, "description": "Reservation fulfilled (delivered)"},
-        400: {"model": ErrorResponse, "description": "Invalid quantity"},
+        200: {"model": InventoryOrderResponse, "description": "Reservation fulfilled (delivered)"},
+        400: {"model": ErrorResponse, "description": "Invalid quantity / empty items"},
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         404: {"model": ErrorResponse, "description": "SKU not found"},
+        409: {"model": ErrorResponse, "description": "Insufficient reserved quantity"},
+        422: {"description": "Validation Error"},
     },
     summary="Списать резерв при доставке (US-B2B-10)",
     description="""
     Финальная точка жизненного цикла резерва. Вызывается B2C при доставке
     заказа покупателю (X-Service-Key).
 
+    Контракт (spec b2b/neomarket-b2b.yaml):
+    - path: POST /api/v1/inventory/fulfill;
+    - request: InventoryOrderRequest {order_id, items[1..*]} — items: minItems=1;
+    - response 200: InventoryOrderResponse {order_id, status: FULFILLED, processed_at}.
+
     Бизнес-логика (canon b2b-flows.md#fulfill-delivery):
     - reserved_quantity -= qty И stock_quantity -= qty (товар физически уехал);
     - active_quantity (= stock − reserved) НЕ меняется;
+    - если reserved_quantity < qty → 409 (явный отказ, без молчаливого clamp);
     - идемпотентность по order_id — повтор от B2C (retry после таймаута) не
       приводит к двойному списанию.
     """,
@@ -174,7 +189,7 @@ async def fulfill(
     _: None = Depends(require_service_key),
 ):
     """
-    POST /api/v1/fulfill - Fulfill a reservation (US-B2B-10).
+    POST /api/v1/inventory/fulfill - Fulfill a reservation (US-B2B-10).
 
     Canon test scenarios:
     - fulfill_decreases_reserved_quantity
