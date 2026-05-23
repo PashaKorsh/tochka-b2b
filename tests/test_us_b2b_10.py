@@ -118,7 +118,7 @@ async def reserved_sku(db_session):
 async def test_fulfill_decreases_reserved_quantity(client, db_session, reserved_sku):
     """Canon: fulfill уменьшает reserved_quantity на доставленное количество."""
     response = await client.post(
-        "/api/v1/fulfill",
+        "/api/v1/inventory/fulfill",
         json={
             "order_id": str(uuid4()),
             "items": [{"sku_id": str(reserved_sku.id), "quantity": 3}],
@@ -141,7 +141,7 @@ async def test_active_quantity_unchanged(client, db_session, reserved_sku):
     before = reserved_sku.stock_quantity - reserved_sku.reserved_quantity
 
     response = await client.post(
-        "/api/v1/fulfill",
+        "/api/v1/inventory/fulfill",
         json={
             "order_id": str(uuid4()),
             "items": [{"sku_id": str(reserved_sku.id), "quantity": 3}],
@@ -164,8 +164,8 @@ async def test_idempotent_fulfill_no_double_deduction(client, db_session, reserv
         "items": [{"sku_id": str(reserved_sku.id), "quantity": 3}],
     }
 
-    first = await client.post("/api/v1/fulfill", json=payload, headers=SERVICE_HEADERS)
-    second = await client.post("/api/v1/fulfill", json=payload, headers=SERVICE_HEADERS)
+    first = await client.post("/api/v1/inventory/fulfill", json=payload, headers=SERVICE_HEADERS)
+    second = await client.post("/api/v1/inventory/fulfill", json=payload, headers=SERVICE_HEADERS)
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -181,7 +181,7 @@ async def test_idempotent_fulfill_no_double_deduction(client, db_session, reserv
 async def test_fulfill_missing_service_key_returns_401(client, reserved_sku):
     """Без X-Service-Key → 401."""
     response = await client.post(
-        "/api/v1/fulfill",
+        "/api/v1/inventory/fulfill",
         json={
             "order_id": str(uuid4()),
             "items": [{"sku_id": str(reserved_sku.id), "quantity": 1}],

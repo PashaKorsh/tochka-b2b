@@ -42,20 +42,24 @@ class InventoryService:
     async def reserve(
         db: AsyncSession,
         idempotency_key: str,
+        order_id: UUID,
         items: list,
     ) -> dict:
         """
-        All-or-nothing reservation (canon b2b-flows.md#reserve-sku).
+        All-or-nothing reservation (canon b2b-flows.md#reserve-sku;
+        spec b2b/neomarket-b2b.yaml#ReserveRequest requires order_id).
 
         - Idempotent by `idempotency_key`: a repeat returns the stored response
           without re-deducting.
+        - `order_id` персистится в записи резерва (внутри result_json) —
+          B2C сможет потом сделать unreserve/fulfill по этому id.
         - Locks the targeted SKU rows with SELECT ... FOR UPDATE in a
           deterministic id order (deadlock-safe).
         - If ANY SKU has insufficient active_quantity → raises ReserveConflict,
           nothing is mutated (the transaction is not committed).
         - On success: reserved_quantity += qty for each SKU.
 
-        Returns the 200 response dict {"reserved": True, "items": [...]}.
+        Returns the 200 response dict {"reserved": True, "order_id": ..., "items": [...]}.
 
         Raises:
             ReserveConflict: at least one SKU short of stock (→ 409).
@@ -72,7 +76,7 @@ class InventoryService:
 
         requested = _aggregate(items)
         if not requested:
-            return {"reserved": True, "items": []}
+            return {"reserved": True, "order_id": str(order_id), "items": []}
 
         # Lock the SKU rows in a stable order to avoid deadlocks under contention.
         result = await db.execute(
@@ -117,7 +121,11 @@ class InventoryService:
             if active == 0:
                 out_of_stock.append(sku)
 
-        result_json = {"reserved": True, "items": response_items}
+        result_json = {
+            "reserved": True,
+            "order_id": str(order_id),
+            "items": response_items,
+        }
         db.add(InventoryOperation(operation_key=op_key, result_json=result_json))
         await db.commit()
 

@@ -14,7 +14,7 @@ from backend.modules.inventory.schemas import (
 from backend.modules.inventory.service import InventoryService, ReserveConflict
 
 
-router = APIRouter(prefix="/api/v1", tags=["Inventory"])
+router = APIRouter(prefix="/api/v1/inventory", tags=["Inventory"])
 
 
 def require_service_key(
@@ -87,6 +87,7 @@ async def reserve(
         result = await InventoryService.reserve(
             db=db,
             idempotency_key=request.idempotency_key,
+            order_id=request.order_id,
             items=request.items,
         )
         return JSONResponse(status_code=status.HTTP_200_OK, content=result)
