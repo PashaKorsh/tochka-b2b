@@ -116,18 +116,25 @@ async def reserved_sku(db_session):
 
 @pytest.mark.asyncio
 async def test_fulfill_decreases_reserved_quantity(client, db_session, reserved_sku):
-    """Canon: fulfill уменьшает reserved_quantity на доставленное количество."""
+    """Canon: fulfill уменьшает reserved_quantity на доставленное количество.
+
+    Ответ соответствует spec InventoryOrderResponse {order_id, status, processed_at}.
+    """
+    order_id = uuid4()
     response = await client.post(
         "/api/v1/inventory/fulfill",
         json={
-            "order_id": str(uuid4()),
+            "order_id": str(order_id),
             "items": [{"sku_id": str(reserved_sku.id), "quantity": 3}],
         },
         headers=SERVICE_HEADERS,
     )
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    body = response.json()
+    assert body["order_id"] == str(order_id)
+    assert body["status"] == "FULFILLED"
+    assert "processed_at" in body and body["processed_at"]
 
     await db_session.refresh(reserved_sku)
     # reserved 4 - 3 = 1; stock 10 - 3 = 7 (товар физически уехал)
@@ -169,12 +176,55 @@ async def test_idempotent_fulfill_no_double_deduction(client, db_session, reserv
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert first.json() == second.json() == {"ok": True}
+    # Replay returns the stored InventoryOrderResponse byte-for-byte; processed_at
+    # is the original timestamp (no second deduction took place).
+    assert first.json() == second.json()
+    assert first.json()["order_id"] == order_id
+    assert first.json()["status"] == "FULFILLED"
 
     await db_session.refresh(reserved_sku)
     # Deducted exactly once: reserved 4 - 3 = 1, stock 10 - 3 = 7.
     assert reserved_sku.reserved_quantity == 1
     assert reserved_sku.stock_quantity == 7
+
+
+@pytest.mark.asyncio
+async def test_fulfill_insufficient_reserved_returns_409(client, db_session, reserved_sku):
+    """
+    Canon: при reserved_quantity < requested quantity отказ должен быть явным
+    (409), а не молчаливым clamp-ом до нуля.
+    """
+    # reserved_sku starts with reserved_quantity=4; we try to fulfill 5.
+    response = await client.post(
+        "/api/v1/inventory/fulfill",
+        json={
+            "order_id": str(uuid4()),
+            "items": [{"sku_id": str(reserved_sku.id), "quantity": 5}],
+        },
+        headers=SERVICE_HEADERS,
+    )
+
+    assert response.status_code == 409
+    data = response.json()
+    assert data["code"] == "CONFLICT"
+    assert "insufficient" in data["message"].lower()
+
+    # Reservation untouched — no partial deduction.
+    await db_session.refresh(reserved_sku)
+    assert reserved_sku.reserved_quantity == 4
+    assert reserved_sku.stock_quantity == 10
+
+
+@pytest.mark.asyncio
+async def test_fulfill_empty_items_returns_422(client, reserved_sku):
+    """Spec InventoryOrderRequest.items: minItems=1 — пустой список → 422."""
+    response = await client.post(
+        "/api/v1/inventory/fulfill",
+        json={"order_id": str(uuid4()), "items": []},
+        headers=SERVICE_HEADERS,
+    )
+
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

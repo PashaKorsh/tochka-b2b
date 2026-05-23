@@ -1,3 +1,5 @@
+from datetime import datetime
+from enum import Enum
 from pydantic import BaseModel, Field
 from typing import List
 from uuid import UUID
@@ -65,12 +67,35 @@ class UnreserveResponse(BaseModel):
 
 class FulfillRequest(BaseModel):
     """
-    Request for POST /api/v1/fulfill (US-B2B-10).
-    Same shape as unreserve — `order_id` служит ключом идемпотентности.
+    Request for POST /api/v1/inventory/fulfill (US-B2B-10).
+
+    Matches spec b2b/neomarket-b2b.yaml#InventoryOrderRequest:
+    `items` is required with at least one entry. `order_id` doubles as the
+    idempotency key for the compensating fulfill operation.
     """
     order_id: UUID = Field(..., description="ID заказа — ключ идемпотентности fulfill")
-    items: List[InventoryItem] = Field(default_factory=list)
+    items: List[InventoryItem] = Field(..., min_length=1, description="Минимум 1 позиция")
 
 
-class FulfillResponse(BaseModel):
-    ok: bool = True
+class InventoryOrderStatus(str, Enum):
+    """
+    Status of an InventoryOrder operation (spec b2b/neomarket-b2b.yaml):
+    UNRESERVED — после успешного unreserve;
+    FULFILLED  — после успешного fulfill.
+    """
+    UNRESERVED = "UNRESERVED"
+    FULFILLED = "FULFILLED"
+
+
+class InventoryOrderResponse(BaseModel):
+    """
+    Response for inventory order operations (spec InventoryOrderResponse):
+    `order_id`, `status` (UNRESERVED|FULFILLED), `processed_at`.
+    """
+    order_id: UUID
+    status: InventoryOrderStatus
+    processed_at: datetime
+
+
+# Kept for backward compatibility with imports / OpenAPI docs of unreserve.
+FulfillResponse = InventoryOrderResponse
