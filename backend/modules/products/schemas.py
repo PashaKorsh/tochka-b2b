@@ -313,12 +313,31 @@ class ProductPublicResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ProductPublicShortResponse(BaseModel):
+    """
+    Compact B2C catalog item, spec b2b/neomarket-b2b.yaml#ProductPublicShortResponse.
+    Без cost_price / reserved_quantity и без полного списка SKU — лишь обложечные
+    поля + минимальная цена для сортировки и предпросмотра.
+    """
+    id: UUID
+    title: str
+    slug: str
+    status: ProductStatus
+    category_id: UUID
+    min_price: int
+    cover_image: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ProductPublicPaginatedResponse(BaseModel):
     """
-    Paginated B2C catalog response (US-B2B-07).
-    Items are public product cards — без cost_price / reserved_quantity.
+    Paginated B2C catalog response, spec#ProductPublicPaginatedResponse (US-B2B-07).
+    Items are short cards (`ProductPublicShortResponse`) — публичный API не отдаёт
+    полные карточки в списке.
     """
-    items: List[ProductPublicResponse]
+    items: List[ProductPublicShortResponse]
     total_count: int
     limit: int
     offset: int

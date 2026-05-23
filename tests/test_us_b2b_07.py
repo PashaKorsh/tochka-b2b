@@ -1,5 +1,5 @@
 """
-US-B2B-07: B2C catalog mode of GET /api/v1/products.
+US-B2B-07: B2C catalog mode of GET /api/v1/public/products.
 
 Canon flow b2b-flows.md#catalog-for-b2c. Covered scenarios:
 - catalog_returns_moderated_in_stock_products
@@ -169,7 +169,7 @@ async def test_catalog_returns_moderated_in_stock_products(
     no_stock = await make_product(db_session, seller, category, title="NoStock")
     await make_sku(db_session, no_stock, stock_quantity=0)
 
-    response = await client.get("/api/v1/products", headers=CATALOG_HEADERS)
+    response = await client.get("/api/v1/public/products", headers=CATALOG_HEADERS)
 
     assert response.status_code == 200
     data = response.json()
@@ -188,7 +188,7 @@ async def test_catalog_excludes_hard_blocked(client, db_session, seller, categor
     )
     await make_sku(db_session, hard_blocked, stock_quantity=10)
 
-    response = await client.get("/api/v1/products", headers=CATALOG_HEADERS)
+    response = await client.get("/api/v1/public/products", headers=CATALOG_HEADERS)
 
     assert response.status_code == 200
     ids = {item["id"] for item in response.json()["items"]}
@@ -204,7 +204,7 @@ async def test_catalog_excludes_deleted(client, db_session, seller, category):
     deleted = await make_product(db_session, seller, category, deleted=True, title="Deleted")
     await make_sku(db_session, deleted, stock_quantity=10)
 
-    response = await client.get("/api/v1/products", headers=CATALOG_HEADERS)
+    response = await client.get("/api/v1/public/products", headers=CATALOG_HEADERS)
 
     assert response.status_code == 200
     ids = {item["id"] for item in response.json()["items"]}
@@ -214,7 +214,7 @@ async def test_catalog_excludes_deleted(client, db_session, seller, category):
 @pytest.mark.asyncio
 async def test_catalog_missing_service_key_returns_401(client):
     """Canon: без X-Service-Key (и без JWT продавца) → 401."""
-    response = await client.get("/api/v1/products")
+    response = await client.get("/api/v1/public/products")
 
     assert response.status_code == 401
     assert response.json()["code"] == "UNAUTHORIZED"
@@ -224,7 +224,7 @@ async def test_catalog_missing_service_key_returns_401(client):
 async def test_catalog_invalid_service_key_returns_401(client):
     """Неверный X-Service-Key → 401."""
     response = await client.get(
-        "/api/v1/products", headers={"X-Service-Key": "wrong-key"}
+        "/api/v1/public/products", headers={"X-Service-Key": "wrong-key"}
     )
 
     assert response.status_code == 401
@@ -235,23 +235,25 @@ async def test_catalog_invalid_service_key_returns_401(client):
 async def test_catalog_response_has_no_cost_price(client, db_session, seller, category):
     """
     Canon: B2C-ответ не содержит cost_price / reserved_quantity —
-    чувствительные поля продавца не утекают в каталог.
+    spec ProductPublicShortResponse: только id/title/slug/status/category_id/
+    min_price/cover_image/created_at, без skus.
     """
     await make_visible_product(db_session, seller, category)
 
-    response = await client.get("/api/v1/products", headers=CATALOG_HEADERS)
+    response = await client.get("/api/v1/public/products", headers=CATALOG_HEADERS)
 
     assert response.status_code == 200
     data = response.json()
     assert len(data["items"]) == 1
     item = data["items"][0]
-    assert len(item["skus"]) == 1
-    sku = item["skus"][0]
-    assert "cost_price" not in sku
-    assert "reserved_quantity" not in sku
-    # public SKU still exposes what B2C needs
-    assert "price" in sku
-    assert "active_quantity" in sku
+    # No SKU list, no cost_price / reserved_quantity anywhere in the short response.
+    assert "skus" not in item
+    assert "cost_price" not in item
+    assert "reserved_quantity" not in item
+    # Public short response still exposes what the storefront needs to render.
+    assert "min_price" in item
+    assert isinstance(item["min_price"], int)
+    assert "cover_image" in item
 
 
 @pytest.mark.asyncio
@@ -273,7 +275,7 @@ async def test_batch_ids_returns_visible_subset(client, db_session, seller, cate
     ids_param = ",".join(str(i) for i in requested)
 
     response = await client.get(
-        f"/api/v1/products?ids={ids_param}", headers=CATALOG_HEADERS
+        f"/api/v1/public/products?ids={ids_param}", headers=CATALOG_HEADERS
     )
 
     assert response.status_code == 200
