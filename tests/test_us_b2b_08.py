@@ -130,9 +130,10 @@ async def test_reserve_all_skus_succeeds(client, db_session, product):
 
     with patch(_OOS_EVENT, new_callable=AsyncMock):
         response = await client.post(
-            "/api/v1/reserve",
+            "/api/v1/inventory/reserve",
             json={
                 "idempotency_key": str(uuid4()),
+                "order_id": str(uuid4()),
                 "items": [
                     {"sku_id": str(sku1.id), "quantity": 3},
                     {"sku_id": str(sku2.id), "quantity": 4},
@@ -164,9 +165,10 @@ async def test_partial_insufficient_stock_returns_409_all_rollback(
 
     with patch(_OOS_EVENT, new_callable=AsyncMock):
         response = await client.post(
-            "/api/v1/reserve",
+            "/api/v1/inventory/reserve",
             json={
                 "idempotency_key": str(uuid4()),
+                "order_id": str(uuid4()),
                 "items": [
                     {"sku_id": str(sku_ok.id), "quantity": 3},
                     {"sku_id": str(sku_short.id), "quantity": 5},
@@ -197,12 +199,13 @@ async def test_idempotent_reserve_returns_200_without_double_deduction(
     key = str(uuid4())
     payload = {
         "idempotency_key": key,
+        "order_id": str(uuid4()),
         "items": [{"sku_id": str(sku.id), "quantity": 3}],
     }
 
     with patch(_OOS_EVENT, new_callable=AsyncMock):
-        first = await client.post("/api/v1/reserve", json=payload, headers=SERVICE_HEADERS)
-        second = await client.post("/api/v1/reserve", json=payload, headers=SERVICE_HEADERS)
+        first = await client.post("/api/v1/inventory/reserve", json=payload, headers=SERVICE_HEADERS)
+        second = await client.post("/api/v1/inventory/reserve", json=payload, headers=SERVICE_HEADERS)
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -220,9 +223,10 @@ async def test_sku_out_of_stock_event_emitted(client, db_session, product):
 
     with patch(_OOS_EVENT, new_callable=AsyncMock) as mock_event:
         response = await client.post(
-            "/api/v1/reserve",
+            "/api/v1/inventory/reserve",
             json={
                 "idempotency_key": str(uuid4()),
+                "order_id": str(uuid4()),
                 "items": [{"sku_id": str(sku.id), "quantity": 5}],
             },
             headers=SERVICE_HEADERS,
@@ -243,9 +247,10 @@ async def test_unreserve_restores_quantities(client, db_session, product):
 
     with patch(_OOS_EVENT, new_callable=AsyncMock):
         reserve = await client.post(
-            "/api/v1/reserve",
+            "/api/v1/inventory/reserve",
             json={
                 "idempotency_key": str(uuid4()),
+                "order_id": str(uuid4()),
                 "items": [{"sku_id": str(sku.id), "quantity": 4}],
             },
             headers=SERVICE_HEADERS,
@@ -255,7 +260,7 @@ async def test_unreserve_restores_quantities(client, db_session, product):
     assert sku.reserved_quantity == 4
 
     unreserve = await client.post(
-        "/api/v1/unreserve",
+        "/api/v1/inventory/unreserve",
         json={
             "order_id": str(uuid4()),
             "items": [{"sku_id": str(sku.id), "quantity": 4}],
@@ -278,9 +283,10 @@ async def test_reserve_missing_service_key_returns_401(client, db_session, produ
     sku = await make_sku(db_session, product, stock_quantity=10)
 
     response = await client.post(
-        "/api/v1/reserve",
+        "/api/v1/inventory/reserve",
         json={
             "idempotency_key": str(uuid4()),
+            "order_id": str(uuid4()),
             "items": [{"sku_id": str(sku.id), "quantity": 1}],
         },
     )
@@ -294,9 +300,10 @@ async def test_reserve_sku_not_found_returns_404(client):
     """Несуществующий sku_id → 404."""
     with patch(_OOS_EVENT, new_callable=AsyncMock):
         response = await client.post(
-            "/api/v1/reserve",
+            "/api/v1/inventory/reserve",
             json={
                 "idempotency_key": str(uuid4()),
+                "order_id": str(uuid4()),
                 "items": [{"sku_id": str(uuid4()), "quantity": 1}],
             },
             headers=SERVICE_HEADERS,

@@ -11,10 +11,14 @@ class InventoryItem(BaseModel):
 
 class ReserveRequest(BaseModel):
     """
-    Request for POST /api/v1/reserve (US-B2B-08).
-    `idempotency_key` генерирует клиент (B2C) — защита от двойного резерва.
+    Request for POST /api/v1/inventory/reserve (US-B2B-08).
+
+    Matches spec b2b/neomarket-b2b.yaml#ReserveRequest:
+    `idempotency_key` и `order_id` обязательны — без `order_id` невозможно
+    связать резерв с заказом для последующего unreserve/fulfill.
     """
     idempotency_key: str = Field(..., min_length=1, description="UUID-строка, генерирует B2C")
+    order_id: UUID = Field(..., description="ID заказа B2C, для которого выполняется резерв")
     items: List[InventoryItem] = Field(default_factory=list)
 
 
@@ -39,6 +43,7 @@ class ReservedItem(BaseModel):
 
 class ReserveResponse(BaseModel):
     reserved: bool = True
+    order_id: UUID
     items: List[ReservedItem]
 
 
