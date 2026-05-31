@@ -341,3 +341,13 @@ class ProductPublicPaginatedResponse(BaseModel):
     total_count: int
     limit: int
     offset: int
+
+
+class BatchPublicProductsRequest(BaseModel):
+    """
+    Request body for POST /api/v1/public/products/batch (spec#batchPublicProducts).
+    `product_ids` — список UUID, ≤100. Возвращаются только видимые товары
+    (MODERATED, не deleted, ≥1 SKU с active>0); скрытые просто отсутствуют
+    в ответе — B2C трактует их как unavailable.
+    """
+    product_ids: List[UUID] = Field(..., max_length=100, description="UUID-ы товаров, ≤100")
