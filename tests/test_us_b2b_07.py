@@ -259,8 +259,10 @@ async def test_catalog_response_has_no_cost_price(client, db_session, seller, ca
 @pytest.mark.asyncio
 async def test_batch_ids_returns_visible_subset(client, db_session, seller, category):
     """
-    Canon: ?ids= возвращает только видимые товары из списка,
-    скрытые просто отсутствуют (без 404).
+    Spec b2b/openapi.yaml#batchPublicProducts:
+    POST /api/v1/public/products/batch с телом {product_ids: [...]} возвращает
+    массив ProductPublicResponse только для видимых товаров; скрытые просто
+    отсутствуют в ответе (B2C трактует как unavailable, без 404).
     """
     visible1 = await make_visible_product(db_session, seller, category, title="V1")
     visible2 = await make_visible_product(db_session, seller, category, title="V2")
@@ -272,16 +274,23 @@ async def test_batch_ids_returns_visible_subset(client, db_session, seller, cate
 
     missing_id = uuid4()
     requested = [visible1.id, visible2.id, hidden.id, missing_id]
-    ids_param = ",".join(str(i) for i in requested)
 
-    response = await client.get(
-        f"/api/v1/public/products?ids={ids_param}", headers=CATALOG_HEADERS
+    response = await client.post(
+        "/api/v1/public/products/batch",
+        json={"product_ids": [str(pid) for pid in requested]},
+        headers=CATALOG_HEADERS,
     )
 
     assert response.status_code == 200
-    data = response.json()
-    returned = {item["id"] for item in data["items"]}
+    items = response.json()
+    assert isinstance(items, list)
+    returned = {item["id"] for item in items}
     assert returned == {str(visible1.id), str(visible2.id)}
     assert str(hidden.id) not in returned
     assert str(missing_id) not in returned
-    assert data["total_count"] == 2
+    # Full ProductPublicResponse per spec — includes skus, no cost_price.
+    for item in items:
+        assert "skus" in item
+        for sku in item["skus"]:
+            assert "cost_price" not in sku
+            assert "reserved_quantity" not in sku

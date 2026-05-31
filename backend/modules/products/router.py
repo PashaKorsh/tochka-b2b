@@ -6,7 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
-from typing import Optional
+from typing import List, Optional
 
 from backend.database import get_db
 from backend.modules.products.models import ProductStatus
@@ -15,6 +15,7 @@ from backend.modules.products.schemas import (
     ProductUpdate, SKUUpdate, ProductShortResponse, ProductPaginatedResponse,
     ProductDetailResponse, ProductPublicResponse, BlockingReasonResponse,
     FieldReportResponse, ProductPublicPaginatedResponse, ProductPublicShortResponse,
+    BatchPublicProductsRequest,
 )
 from backend.modules.inventory.router import require_service_key
 from backend.modules.products.service import ProductService
@@ -542,7 +543,6 @@ async def list_products(
     response_model=ProductPublicPaginatedResponse,
     responses={
         200: {"description": "B2C catalog page"},
-        400: {"model": ErrorResponse, "description": "Invalid ids parameter"},
         401: {"model": ErrorResponse, "description": "Unauthorized — invalid X-Service-Key"},
     },
     summary="B2C-каталог (US-B2B-07)",
@@ -552,13 +552,15 @@ async def list_products(
     Бизнес-логика (canon b2b-flows.md#catalog-for-b2c):
     - видимость: status=MODERATED, deleted=false, есть SKU с active_quantity>0;
     - фильтры: category, search, sort (price_asc|price_desc|date_desc);
-    - ids=uuid1,uuid2,... — батч; скрытые товары просто отсутствуют (без 404);
     - ответ ProductPublicPaginatedResponse → items ProductPublicShortResponse
       (БЕЗ cost_price / reserved_quantity).
 
-    Соответствие spec (b2b/neomarket-b2b.yaml, neomarket-protocols):
+    Соответствие spec (b2b/openapi.yaml, neomarket-protocols):
     - Path:     GET /api/v1/public/products
     - Response: ProductPublicPaginatedResponse / ProductPublicShortResponse
+
+    Батч-запрос по списку product_ids — на отдельном эндпоинте
+    `POST /api/v1/public/products/batch` (spec#batchPublicProducts).
     """,
 )
 async def list_public_catalog(
@@ -567,7 +569,6 @@ async def list_public_catalog(
     category_id: Optional[UUID] = Query(None, alias="category"),
     search: Optional[str] = Query(None),
     sort: str = Query("date_desc"),
-    ids: Optional[str] = Query(None, description="Батч: UUID через запятую"),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_key),
 ) -> ProductPublicPaginatedResponse:
@@ -579,41 +580,66 @@ async def list_public_catalog(
     - catalog_excludes_hard_blocked
     - catalog_missing_service_key_returns_401
     - catalog_response_has_no_cost_price
-    - batch_ids_returns_visible_subset
     """
-    id_list = None
-    if ids is not None:
-        try:
-            id_list = [UUID(token.strip()) for token in ids.split(",") if token.strip()]
-        except ValueError:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "code": "INVALID_REQUEST",
-                    "message": "ids must be comma-separated UUIDs",
-                },
-            )
-    if id_list is not None:
-        # Batch — вернуть все видимые из списка, без пагинации.
-        eff_limit, eff_offset = min(max(len(id_list), 1), 100), 0
-    else:
-        eff_limit, eff_offset = limit, offset
-
     products, total_count = await ProductService.list_catalog_products(
         db,
-        limit=eff_limit,
-        offset=eff_offset,
+        limit=limit,
+        offset=offset,
         category_id=category_id,
         search=search,
         sort=sort,
-        ids=id_list,
     )
     return ProductPublicPaginatedResponse(
         items=[_to_public_short_response(product) for product in products],
         total_count=total_count,
-        limit=eff_limit,
-        offset=eff_offset,
+        limit=limit,
+        offset=offset,
     )
+
+
+@router.post(
+    "/public/products/batch",
+    response_model=List[ProductPublicResponse],
+    responses={
+        200: {"description": "Visible subset of the requested product_ids (no 404 for hidden)"},
+        401: {"model": ErrorResponse, "description": "Unauthorized — invalid X-Service-Key"},
+        422: {"description": "Validation Error"},
+    },
+    summary="B2C batch — карточки по списку product_ids (US-B2B-07)",
+    description="""
+    Batch-получение публичных карточек товара по списку product_ids.
+    Возвращает массив только для существующих и публикуемых товаров;
+    скрытые товары (HARD_BLOCKED, deleted, без active SKU) просто отсутствуют
+    в ответе — B2C трактует их как unavailable, без 404.
+
+    Соответствие spec (b2b/openapi.yaml#batchPublicProducts, neomarket-protocols):
+    - Path:     POST /api/v1/public/products/batch
+    - Request:  {product_ids: [UUID, ...]}, maxItems=100
+    - Response: List[ProductPublicResponse] — полные публичные карточки
+      (без cost_price / reserved_quantity, items в skus — SKUPublicResponse).
+    """,
+)
+async def batch_public_catalog(
+    request: BatchPublicProductsRequest,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_key),
+) -> List[ProductPublicResponse]:
+    """
+    POST /api/v1/public/products/batch - B2C batch (US-B2B-07).
+
+    Canon test scenario:
+    - batch_ids_returns_visible_subset
+    """
+    if not request.product_ids:
+        return []
+
+    products, _total = await ProductService.list_catalog_products(
+        db,
+        limit=len(request.product_ids),
+        offset=0,
+        ids=request.product_ids,
+    )
+    return [ProductPublicResponse.model_validate(product) for product in products]
 
 
 @router.delete(
