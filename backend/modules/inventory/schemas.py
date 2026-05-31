@@ -11,75 +11,64 @@ class InventoryItem(BaseModel):
     quantity: int
 
 
+# ───────────────────── Requests ─────────────────────
+
 class ReserveRequest(BaseModel):
     """
     Request for POST /api/v1/inventory/reserve (US-B2B-08).
 
-    Matches spec b2b/neomarket-b2b.yaml#ReserveRequest:
+    Matches spec b2b/openapi.yaml#ReserveRequest:
     `idempotency_key` и `order_id` обязательны — без `order_id` невозможно
     связать резерв с заказом для последующего unreserve/fulfill.
     """
     idempotency_key: str = Field(..., min_length=1, description="UUID-строка, генерирует B2C")
     order_id: UUID = Field(..., description="ID заказа B2C, для которого выполняется резерв")
-    items: List[InventoryItem] = Field(default_factory=list)
+    items: List[InventoryItem] = Field(..., min_length=1, description="Минимум 1 позиция")
 
 
 class UnreserveRequest(BaseModel):
     """
-    Request for POST /api/v1/unreserve (US-B2B-08).
-    `order_id` служит ключом идемпотентности компенсирующей операции.
+    Request for POST /api/v1/inventory/unreserve (US-B2B-08).
+    spec b2b/openapi.yaml#InventoryOrderRequest; `order_id` служит ключом
+    идемпотентности компенсирующей операции.
     """
     order_id: UUID = Field(..., description="ID заказа — ключ идемпотентности unreserve")
-    items: List[InventoryItem] = Field(default_factory=list)
-
-
-# Response bodies are assembled as plain dicts in the service (stored in the
-# idempotency log as JSON) — see InventoryService. Schemas below document the
-# contract for OpenAPI.
-
-class ReservedItem(BaseModel):
-    sku_id: UUID
-    reserved_quantity: int
-    remaining_stock: int
-
-
-class ReserveResponse(BaseModel):
-    reserved: bool = True
-    order_id: UUID
-    items: List[ReservedItem]
-
-
-class FailedItem(BaseModel):
-    sku_id: UUID
-    requested: int
-    available: int
-    reason: str
-
-
-class ReserveConflictResponse(BaseModel):
-    reserved: bool = False
-    failed_items: List[FailedItem]
-
-
-class UnreserveResponse(BaseModel):
-    ok: bool = True
+    items: List[InventoryItem] = Field(..., min_length=1, description="Минимум 1 позиция")
 
 
 class FulfillRequest(BaseModel):
     """
     Request for POST /api/v1/inventory/fulfill (US-B2B-10).
 
-    Matches spec b2b/neomarket-b2b.yaml#InventoryOrderRequest:
-    `items` is required with at least one entry. `order_id` doubles as the
-    idempotency key for the compensating fulfill operation.
+    Matches spec b2b/openapi.yaml#InventoryOrderRequest:
+    `items` required, ≥1. `order_id` doubles as the idempotency key for the
+    compensating fulfill operation.
     """
     order_id: UUID = Field(..., description="ID заказа — ключ идемпотентности fulfill")
     items: List[InventoryItem] = Field(..., min_length=1, description="Минимум 1 позиция")
 
 
+# ───────────────────── Responses ─────────────────────
+
+class ReserveStatus(str, Enum):
+    """Spec b2b/openapi.yaml#ReserveResponse.status — единственное значение."""
+    RESERVED = "RESERVED"
+
+
+class ReserveResponse(BaseModel):
+    """
+    Success response for POST /api/v1/inventory/reserve.
+    Strict shape from spec b2b/openapi.yaml#ReserveResponse:
+    {order_id, status: RESERVED, reserved_at}.
+    """
+    order_id: UUID
+    status: ReserveStatus = ReserveStatus.RESERVED
+    reserved_at: datetime
+
+
 class InventoryOrderStatus(str, Enum):
     """
-    Status of an InventoryOrder operation (spec b2b/neomarket-b2b.yaml):
+    Status of an InventoryOrder operation (spec b2b/openapi.yaml):
     UNRESERVED — после успешного unreserve;
     FULFILLED  — после успешного fulfill.
     """
@@ -91,11 +80,13 @@ class InventoryOrderResponse(BaseModel):
     """
     Response for inventory order operations (spec InventoryOrderResponse):
     `order_id`, `status` (UNRESERVED|FULFILLED), `processed_at`.
+    Used for both /unreserve and /fulfill.
     """
     order_id: UUID
     status: InventoryOrderStatus
     processed_at: datetime
 
 
-# Kept for backward compatibility with imports / OpenAPI docs of unreserve.
+# Aliases — kept for backward compatibility with router imports / OpenAPI docs.
+UnreserveResponse = InventoryOrderResponse
 FulfillResponse = InventoryOrderResponse
