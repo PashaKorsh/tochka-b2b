@@ -76,7 +76,16 @@ class InventoryService:
 
         requested = _aggregate(items)
         if not requested:
-            return {"reserved": True, "order_id": str(order_id), "items": []}
+            # Defensive — the router enforces min_length=1 on items, so this
+            # branch is unreachable through the public API. Return a spec-shaped
+            # response for direct service callers.
+            return {
+                "order_id": str(order_id),
+                "status": "RESERVED",
+                "reserved_at": datetime.now(timezone.utc)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
+            }
 
         # Lock the SKU rows in a stable order to avoid deadlocks under contention.
         result = await db.execute(
@@ -107,24 +116,23 @@ class InventoryService:
             raise ReserveConflict(failed)
 
         # Apply the reservation.
-        response_items = []
         out_of_stock = []
         for sku_id, qty in requested.items():
             sku = skus[sku_id]
             sku.reserved_quantity += qty
-            active = sku.stock_quantity - sku.reserved_quantity
-            response_items.append({
-                "sku_id": str(sku_id),
-                "reserved_quantity": sku.reserved_quantity,
-                "remaining_stock": active,
-            })
-            if active == 0:
+            if sku.stock_quantity - sku.reserved_quantity == 0:
                 out_of_stock.append(sku)
 
+        # Spec b2b/openapi.yaml#ReserveResponse: {order_id, status: RESERVED, reserved_at}.
+        reserved_at = (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
         result_json = {
-            "reserved": True,
             "order_id": str(order_id),
-            "items": response_items,
+            "status": "RESERVED",
+            "reserved_at": reserved_at,
         }
         db.add(InventoryOperation(operation_key=op_key, result_json=result_json))
         await db.commit()
@@ -178,7 +186,17 @@ class InventoryService:
                 # Clamp at 0 — never let reserved_quantity go negative.
                 sku.reserved_quantity = max(0, sku.reserved_quantity - qty)
 
-        result_json = {"ok": True}
+        # Spec b2b/openapi.yaml#InventoryOrderResponse: {order_id, status, processed_at}.
+        processed_at = (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+        result_json = {
+            "order_id": str(order_id),
+            "status": "UNRESERVED",
+            "processed_at": processed_at,
+        }
         db.add(InventoryOperation(operation_key=op_key, result_json=result_json))
         await db.commit()
         return result_json

@@ -143,11 +143,11 @@ async def test_reserve_all_skus_succeeds(client, db_session, product):
         )
 
     assert response.status_code == 200
+    # Spec b2b/openapi.yaml#ReserveResponse: {order_id, status, reserved_at}.
     data = response.json()
-    assert data["reserved"] is True
-    by_sku = {item["sku_id"]: item for item in data["items"]}
-    assert by_sku[str(sku1.id)]["reserved_quantity"] == 3
-    assert by_sku[str(sku1.id)]["remaining_stock"] == 7
+    assert data["status"] == "RESERVED"
+    assert "order_id" in data
+    assert "reserved_at" in data and data["reserved_at"]
 
     await db_session.refresh(sku1)
     await db_session.refresh(sku2)
@@ -178,9 +178,12 @@ async def test_partial_insufficient_stock_returns_409_all_rollback(
         )
 
     assert response.status_code == 409
+    # Spec Error shape {code, message}; structured details — расширение
+    # spec#Error.details: object additionalProperties=true.
     data = response.json()
-    assert data["reserved"] is False
-    failed_ids = {f["sku_id"] for f in data["failed_items"]}
+    assert data["code"] == "CONFLICT"
+    assert "message" in data and data["message"]
+    failed_ids = {f["sku_id"] for f in data["details"]["failed_items"]}
     assert str(sku_short.id) in failed_ids
 
     # Nothing reserved — full rollback.
@@ -209,7 +212,10 @@ async def test_idempotent_reserve_returns_200_without_double_deduction(
 
     assert first.status_code == 200
     assert second.status_code == 200
+    # Replay returns the stored ReserveResponse byte-for-byte —
+    # incl. the original reserved_at (no second deduction took place).
     assert first.json() == second.json()
+    assert first.json()["status"] == "RESERVED"
 
     # Reserved exactly once.
     await db_session.refresh(sku)
@@ -233,7 +239,10 @@ async def test_sku_out_of_stock_event_emitted(client, db_session, product):
         )
 
     assert response.status_code == 200
-    assert response.json()["items"][0]["remaining_stock"] == 0
+    # Out-of-stock check moves to the DB (ReserveResponse no longer carries
+    # per-SKU remaining_stock — see spec b2b/openapi.yaml#ReserveResponse).
+    await db_session.refresh(sku)
+    assert sku.stock_quantity - sku.reserved_quantity == 0
 
     mock_event.assert_awaited_once()
     args = mock_event.call_args.args
@@ -259,17 +268,22 @@ async def test_unreserve_restores_quantities(client, db_session, product):
     await db_session.refresh(sku)
     assert sku.reserved_quantity == 4
 
+    unreserve_order_id = uuid4()
     unreserve = await client.post(
         "/api/v1/inventory/unreserve",
         json={
-            "order_id": str(uuid4()),
+            "order_id": str(unreserve_order_id),
             "items": [{"sku_id": str(sku.id), "quantity": 4}],
         },
         headers=SERVICE_HEADERS,
     )
 
     assert unreserve.status_code == 200
-    assert unreserve.json() == {"ok": True}
+    # Spec b2b/openapi.yaml#InventoryOrderResponse: {order_id, status, processed_at}.
+    body = unreserve.json()
+    assert body["order_id"] == str(unreserve_order_id)
+    assert body["status"] == "UNRESERVED"
+    assert "processed_at" in body and body["processed_at"]
 
     await db_session.refresh(sku)
     assert sku.reserved_quantity == 0

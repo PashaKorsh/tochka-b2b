@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.modules.products.schemas import ErrorResponse
 from backend.modules.inventory.schemas import (
-    ReserveRequest, UnreserveRequest, ReserveResponse, ReserveConflictResponse,
+    ReserveRequest, UnreserveRequest, ReserveResponse,
     UnreserveResponse, FulfillRequest, InventoryOrderResponse,
 )
 from backend.modules.inventory.service import InventoryService, ReserveConflict
@@ -62,11 +62,17 @@ def _value_error_response(error_msg: str) -> Optional[JSONResponse]:
         400: {"model": ErrorResponse, "description": "Invalid quantity"},
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         404: {"model": ErrorResponse, "description": "SKU not found"},
-        409: {"model": ReserveConflictResponse, "description": "Insufficient stock — all rolled back"},
+        409: {"model": ErrorResponse, "description": "Insufficient stock — all rolled back"},
+        422: {"description": "Validation Error"},
     },
     summary="Зарезервировать SKU (US-B2B-08)",
     description="""
     All-or-nothing резервирование SKU. Вызывается B2C при checkout (X-Service-Key).
+
+    Контракт (spec b2b/openapi.yaml):
+    - request:  ReserveRequest {idempotency_key, order_id, items[1..*]}
+    - response 200: ReserveResponse {order_id, status: RESERVED, reserved_at}
+    - response 409: Error {code: CONFLICT, message, details.failed_items[]}
 
     Бизнес-логика (canon b2b-flows.md#reserve-sku):
     - SKU блокируются SELECT FOR UPDATE в детерминированном порядке id;
@@ -99,9 +105,16 @@ async def reserve(
         )
         return JSONResponse(status_code=status.HTTP_200_OK, content=result)
     except ReserveConflict as e:
+        # Spec Error shape {code, message, details?}. Подробности по неудачным
+        # SKU кладём в details.failed_items — это валидное расширение
+        # (spec#Error.details: object, additionalProperties: true).
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            content={"reserved": False, "failed_items": e.failed_items},
+            content={
+                "code": "CONFLICT",
+                "message": "Insufficient stock for one or more SKUs",
+                "details": {"failed_items": e.failed_items},
+            },
         )
     except ValueError as e:
         response = _value_error_response(str(e))
@@ -124,9 +137,13 @@ async def reserve(
     Компенсирующая операция к reserve — освобождает зарезервированное количество.
     Вызывается B2C при отмене заказа (X-Service-Key).
 
+    Контракт (spec b2b/openapi.yaml):
+    - request:  InventoryOrderRequest {order_id, items[1..*]}
+    - response 200: InventoryOrderResponse {order_id, status: UNRESERVED, processed_at}
+
     Бизнес-логика (canon b2b-flows.md#reserve-sku):
     - SKU блокируются SELECT FOR UPDATE; reserved_quantity -= qty (не ниже 0);
-    - идемпотентность по order_id (повтор → {"ok": true} без повторного восстановления).
+    - идемпотентность по order_id (повтор → тот же ответ без повторного восстановления).
     """,
 )
 async def unreserve(
